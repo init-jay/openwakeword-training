@@ -83,11 +83,12 @@ Training takes 4-8 hours depending on GPU.
 Test on your host machine (needs microphone access):
 
 ```bash
-pip install openwakeword pyaudio numpy
-python test_model.py --model my_custom_model/hey_cal.onnx
+pip install openwakeword numpy
+python test_model.py --list-devices                             # find your mic
+python test_model.py --model my_custom_model/hey_cal.onnx --device 0
 ```
 
-Speak your wake word into the microphone and watch for detections.
+Speak your wake word into the microphone and watch for detections. Capture goes through ffmpeg, so no PortAudio/PyAudio install is needed — just `ffmpeg` on your PATH.
 
 ## Configuration
 
