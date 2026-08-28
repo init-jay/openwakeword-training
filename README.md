@@ -129,6 +129,24 @@ python test_model.py --model my_custom_model/hey_cal.onnx --device 0
 
 Speak your wake word into the microphone and watch for detections. Capture goes through ffmpeg, so no PortAudio/PyAudio install is needed — just `ffmpeg` on your PATH.
 
+### 6. Measure It (Optional)
+
+Live testing tells you it works; these tell you how well, and are worth running before and after any change to the pipeline.
+
+```bash
+# build a targeted negative corpus, then score the model against it per category
+python generate_negatives.py --url http://localhost:8880/v1/audio/speech --out negatives_tts
+python eval_model.py --model my_custom_model/hey_cal.onnx \
+    --positives my_real_samples --negatives negatives_tts
+
+# where in the detection window did the model actually learn to expect the phrase?
+python check_model_alignment.py --model my_custom_model/hey_cal.onnx
+```
+
+`eval_model.py` streams the model over each clip exactly as live detection does, and reports negatives **per category** — the corpus is adversarial by construction, so a pooled false-accept rate is meaningless. `check_model_alignment.py` sweeps where the phrase sits in the window; the gap it peaks at is also the model's latency floor, since it cannot fire until that much audio has arrived after you stop speaking. Both accept `.onnx` or `.tflite` — prefer the `.tflite` if that is what you deploy.
+
+`generate_positives.py` builds synthetic positives across sweeps of speed, level, background noise, and phrase-runs-into-command, which is how the speed ceiling and the run-on weakness in `tuning.md` were found.
+
 ## Configuration
 
 | Parameter | Default | Description |
