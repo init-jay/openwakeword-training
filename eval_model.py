@@ -187,7 +187,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Score a wake-word model against the tuning.md gates",
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--model", required=True, help="Trained .onnx model")
+    parser.add_argument("--model", required=True, help="Trained .onnx or .tflite model")
     parser.add_argument("--positives", default="my_real_samples",
                         help="Directory of positive clips, searched recursively")
     parser.add_argument("--negatives", default="negatives_tts",
@@ -202,8 +202,11 @@ def main():
     # Imported here so --help works without openwakeword installed.
     from openwakeword.model import Model
 
+    # openWakeWord defaults to tflite; pick from the extension so the gates can be
+    # scored on the artifact that actually ships, not only on the ONNX it came from.
+    framework = "tflite" if Path(args.model).suffix == ".tflite" else "onnx"
     name = Path(args.model).stem
-    model = Model(wakeword_models=[args.model], inference_framework="onnx")
+    model = Model(wakeword_models=[args.model], inference_framework=framework)
     rng = np.random.default_rng(0)
 
     positives, skipped_p = load_dir(args.positives)
