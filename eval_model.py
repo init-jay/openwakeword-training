@@ -258,15 +258,15 @@ def main():
         lat = np.array(latencies)
         print(f"  latency from speech end   median {np.median(lat):>6.0f}ms   "
               f"p90 {np.percentile(lat, 90):>6.0f}ms")
-        # A clip cannot legitimately be detected before its speech ends. When it
-        # happens the clip almost always holds two utterances - the model fires on
-        # the first, while the marker sits at the end of the second. The mean is
-        # useless in their presence, hence median and p90 above.
+        # Firing before the speech-end marker is normal for this corpus rather than a
+        # defect: the marker is the last sample above 2% of peak, and these recordings
+        # have a high noise floor (median -26 dB), so it lands on room tone after the
+        # phrase. The model fires on the phrase, correctly, before the marker. It does
+        # drag the mean negative, which is why median and p90 are reported instead.
         early = int((lat < 0).sum())
         if early:
-            print(f"  NOTE: {early} clip(s) fired before their speech-end marker - "
-                  f"likely two utterances in one file.")
-            print("        check_alignment.py flags these as over 2x the median length.")
+            print(f"  NOTE: {early} clip(s) fired before their speech-end marker, which "
+                  f"puts a floor under how low the median can read.")
     if misses:
         print(f"  missed {len(misses)}:")
         for clip_name, peak in sorted(misses, key=lambda r: -r[1])[:8]:

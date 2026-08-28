@@ -22,6 +22,9 @@ the same 56 positives (`eval_model.py`, threshold 0.5):
 | detection, 300 ms pause then command | 52/56 | 50/56 | — |
 | median latency from end of speech | 220 ms | **70 ms** | < 120 ms |
 
+The tflite conversion reproduces these numbers exactly — identical per-clip scores, not
+merely identical totals — so the gates hold for the shipping artifact, not just the ONNX.
+
 Three of the four moved substantially and latency now passes. Two things are worth
 reading carefully:
 
@@ -37,14 +40,27 @@ the model had learned the phrase is followed by silence, and fixing the alignmen
 removed that on its own. What remains is a flat 89%, not a gap between two interaction
 styles.
 
-**The cost:** clean positives went 53 -> 51. One of the two newly-missed clips,
-`hey_seeree_0016.wav`, is one of the merged-utterance recordings `check_alignment.py`
-flags as over 2x the median length, so it is bad training data as much as a regression.
+**The cost:** clean positives went 53 -> 51, and the cause is not yet known.
 `max_negative_weight` (`train.py`, 2000) is the lever if the model needs loosening.
 
+Three explanations for the misses were checked and ruled out:
+
+* *Misalignment in the recordings.* Measured against a threshold crackle cannot reach
+  (-15 dB of peak RMS), trailing non-speech is at most 170 ms across all 91 clips,
+  median 70 ms — inside the normal pad + jitter budget. No clip is misaligned.
+* *Merged utterances.* The long clips (`jay/hey_seeree_0001.wav`, 1650 ms) are
+  continuously energetic end to end — one slow utterance, not two.
+* *Recording level or noise.* The five missed clips have a median peak amplitude of
+  2842 against 2574 for the detected ones, and the same -25 dB noise floor. The five
+  quietest clips in the corpus are all detected.
+
+Worth knowing but not the cause: the corpus is quiet overall — median peak 2472 of
+32767 (~ -22 dBFS) with a -26 dB noise floor, which is what makes it sound crackly.
+That applies to every clip equally, detected or not.
+
 Remaining work, in order: the four `extend` false accepts are what Priority 3's trailing
-context is supposed to discriminate, and the two merged-utterance recordings should be
-re-recorded or dropped.
+context is supposed to discriminate, and the five missed positives need a cause before
+anything is done about them.
 
 ---
 
