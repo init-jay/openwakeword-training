@@ -33,6 +33,13 @@ RUN python3 /tmp/skip-piper-import.py openwakeword/openwakeword/train.py
 COPY patches/honour-augmentation-rounds.py /tmp/honour-augmentation-rounds.py
 RUN python3 /tmp/honour-augmentation-rounds.py openwakeword/openwakeword/train.py
 
+# Patch: choose the feature-computation device from onnxruntime's own providers.
+# Upstream asks torch, so with the CPU build of onnxruntime (which openwakeword's
+# setup.py pins) it requests a CUDA provider that does not exist AND sets ncpu=1,
+# leaving feature computation single-threaded on CPU - 36 min of an 83 min run.
+COPY patches/feature-device-selection.py /tmp/feature-device-selection.py
+RUN python3 /tmp/feature-device-selection.py openwakeword/openwakeword/train.py
+
 # Download embedding models (small, safe to bake into image)
 RUN mkdir -p openwakeword/openwakeword/resources/models \
     && curl -L -o openwakeword/openwakeword/resources/models/embedding_model.onnx \
