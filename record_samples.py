@@ -37,11 +37,16 @@ DURATION = 2.0  # seconds of usable audio captured after the cue
 WARMUP = 0.6    # seconds discarded after opening the device, before the cue
 
 FULL_SCALE = 32768.0
-# Speech should peak somewhere near -12 dBFS. Much below that and the recording is
-# wasting dynamic range: the first corpus recorded with this script came in at a
-# median peak of -22 dBFS with a -26 dB noise floor, which is audibly crackly and
-# cannot be repaired afterwards - amplifying a quiet clip raises its noise with it,
-# so SNR is fixed at capture. The only fix is more gain while recording.
+# Speech should peak somewhere near -12 dBFS.
+#
+# Be clear about what this does and does not buy. Absolute level turns out not to
+# matter to the model at all: a synthetic sweep from -6 to -34 dBFS detected 6/6 at
+# every step with a flat median score of ~0.984. What does matter is SNR, which
+# degrades detection below about 15 dB. Recording hot is therefore about margin -
+# it keeps SNR high and leaves headroom - not about a level the model needs.
+#
+# The reason to warn at capture rather than fix it later is that SNR is fixed at
+# capture: amplifying a quiet clip raises its noise with it.
 LOW_LEVEL_DBFS = -18.0
 CLIPPING_DBFS = -0.5
 LOW_SNR_DB = 20.0

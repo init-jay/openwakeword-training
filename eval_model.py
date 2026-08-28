@@ -41,6 +41,7 @@ or with PYTHONPATH pointing at an openWakeWord checkout.
 import argparse
 import re
 import sys
+import zlib
 from collections import defaultdict
 from pathlib import Path
 
@@ -88,6 +89,17 @@ def speech_end(data):
     return int(above[-1]) if above.size else None
 
 
+def clip_rng(clip_name):
+    """A generator seeded by the clip's name.
+
+    One shared stream would make a clip's padding noise depend on how many clips
+    came before it, so adding files to the corpus would silently change the result
+    for every clip after them - 6/6 and 5/6 on identical audio. crc32 rather than
+    hash() because hash() is salted per process.
+    """
+    return np.random.default_rng(zlib.crc32(clip_name.encode()))
+
+
 def with_noise_floor(data, rng, pad_s=PAD_S):
     """Pad with room tone rather than zeros, and report where the clip starts."""
     pad = int(SR * pad_s)
@@ -124,23 +136,28 @@ def load_dir(directory, recursive=True):
 
 
 def evaluate_positives(model, name, clips, threshold, rng, verbose):
-    """Detection rate and latency from end of speech, on clean positives."""
-    detected, latencies, misses = 0, [], []
+    """Per-clip (name, detected, latency_ms or None, peak score)."""
+    rows = []
     for clip_name, data in clips:
-        audio, pad = with_noise_floor(data, rng)
+        audio, pad = with_noise_floor(data, clip_rng(clip_name))
         scores, offsets = stream(model, name, audio)
         crossing = first_crossing(scores, offsets, threshold)
-        if crossing is None:
-            misses.append((clip_name, float(scores.max())))
-            continue
-        detected += 1
-        end = speech_end(data)
-        if end is not None:
-            latencies.append((crossing - (pad + end)) / SR * 1000)
+        latency = None
+        if crossing is not None:
+            end = speech_end(data)
+            if end is not None:
+                latency = (crossing - (pad + end)) / SR * 1000
+        rows.append((clip_name, crossing is not None, latency, float(scores.max())))
         if verbose:
-            print(f"    {clip_name[:36]:<38}peak {scores.max():.3f}  "
-                  f"latency {(crossing - (pad + end)) / SR * 1000:>6.0f}ms")
-    return detected, latencies, misses
+            lat = f"{latency:>6.0f}ms" if latency is not None else "      -"
+            print(f"    {clip_name[:36]:<38}peak {scores.max():.3f}  latency {lat}")
+    return rows
+
+
+def group_key(clip_name):
+    """Sweep and value from a generate_positives.py filename (speed_0.55_af_bella)."""
+    parts = clip_name.rsplit(".", 1)[0].split("_")
+    return "_".join(parts[:2]) if len(parts) >= 3 else "(ungrouped)"
 
 
 def evaluate_with_command(model, name, clips, commands, threshold, rng, gap_ms, verbose):
@@ -155,7 +172,7 @@ def evaluate_with_command(model, name, clips, commands, threshold, rng, gap_ms, 
         command = commands[i % len(commands)][1]
         gap = np.zeros(int(SR * gap_ms / 1000), dtype=np.int16) if gap_ms else None
         parts = [data] + ([gap] if gap is not None else []) + [command]
-        audio, _ = with_noise_floor(np.concatenate(parts), rng)
+        audio, _ = with_noise_floor(np.concatenate(parts), clip_rng(clip_name))
         scores, _ = stream(model, name, audio)
         if scores.max() >= threshold:
             detected += 1
@@ -171,7 +188,7 @@ def evaluate_negatives(model, name, clips, threshold, rng):
     """Max score per clip, grouped by the category in the filename prefix."""
     by_category = defaultdict(list)
     for clip_name, data in clips:
-        audio, _ = with_noise_floor(data, rng)
+        audio, _ = with_noise_floor(data, clip_rng(clip_name))
         scores, _ = stream(model, name, audio)
         match = CATEGORY_RE.match(clip_name)
         category = match.group(1) if match else "(uncategorised)"
@@ -196,6 +213,10 @@ def main():
     parser.add_argument("--command-gap-ms", type=float, default=300,
                         help="Pause to test alongside the no-pause case (default: %(default)s)")
     parser.add_argument("--limit", type=int, help="Only use the first N clips of each set")
+    parser.add_argument("--by-group", action="store_true",
+                        help="Break positives down by the sweep encoded in their "
+                             "filename (speed_0.55_af_bella -> speed_0.55), as "
+                             "generate_positives.py names them")
     parser.add_argument("--verbose", action="store_true", help="Print a row per positive")
     args = parser.parse_args()
 
@@ -251,8 +272,10 @@ def main():
 
     # --- positives ---------------------------------------------------------------
     print("\nPOSITIVES")
-    detected, latencies, misses = evaluate_positives(
-        model, name, positives, args.threshold, rng, args.verbose)
+    rows = evaluate_positives(model, name, positives, args.threshold, rng, args.verbose)
+    detected = sum(1 for r in rows if r[1])
+    latencies = [r[2] for r in rows if r[2] is not None]
+    misses = [(r[0], r[3]) for r in rows if not r[1]]
     print(f"  detected            {detected}/{len(positives)} ({detected / len(positives):.0%})")
     if latencies:
         lat = np.array(latencies)
@@ -271,6 +294,23 @@ def main():
         print(f"  missed {len(misses)}:")
         for clip_name, peak in sorted(misses, key=lambda r: -r[1])[:8]:
             print(f"    {clip_name[:44]:<46}{peak:.3f}")
+
+    # A swept corpus pooled into one number says nothing - the whole point of a sweep
+    # is where along it the model stops working.
+    groups = defaultdict(list)
+    for clip_name, ok, latency, peak in rows:
+        groups[group_key(clip_name)].append((ok, latency, peak))
+    if args.by_group and len(groups) > 1:
+        print(f"\n  {'group':<16}{'n':>4}{'detected':>10}{'median score':>14}"
+              f"{'median latency':>16}")
+        for key in sorted(groups):
+            entries = groups[key]
+            ok = sum(1 for e in entries if e[0])
+            lats = [e[1] for e in entries if e[1] is not None]
+            peaks = np.array([e[2] for e in entries])
+            lat = f"{np.median(lats):.0f}ms" if lats else "-"
+            print(f"  {key:<16}{len(entries):>4}{ok:>6}/{len(entries):<3}"
+                  f"{np.median(peaks):>14.3f}{lat:>16}")
 
     # --- positives with a command following ---------------------------------------
     commands = [(n, d) for n, d in negatives if n.startswith("command_")]
@@ -295,10 +335,15 @@ def main():
     # --- gates -------------------------------------------------------------------
     print("\n" + "=" * 70)
     print("GATES")
-    rate = adversarial_fired / adversarial_n if adversarial_n else 0.0
-    checks = [(f"extend+hey_other false accepts  {adversarial_fired}/{adversarial_n} "
-               f"({rate:.0%})", f"< {GATE_FALSE_ACCEPT:.0%}",
-               adversarial_n > 0 and rate < GATE_FALSE_ACCEPT)]
+    checks = []
+    if adversarial_n:
+        rate = adversarial_fired / adversarial_n
+        checks.append((f"extend+hey_other false accepts  {adversarial_fired}/"
+                       f"{adversarial_n} ({rate:.0%})", f"< {GATE_FALSE_ACCEPT:.0%}",
+                       rate < GATE_FALSE_ACCEPT))
+    else:
+        # Scoring FAIL on a gate with no data reads as a real failure. Say so instead.
+        print(f"  [ -- ]  extend+hey_other false accepts  no clips in those categories")
     checks.append((f"clean positive detection        {detected}/{len(positives)} "
                    f"({detected / len(positives):.0%})", f">= {GATE_POSITIVE:.0%}",
                    detected / len(positives) >= GATE_POSITIVE))

@@ -28,6 +28,11 @@ RUN git clone https://github.com/dscripka/openWakeWord openwakeword \
 COPY patches/skip-piper-import.py /tmp/skip-piper-import.py
 RUN python3 /tmp/skip-piper-import.py openwakeword/openwakeword/train.py
 
+# Patch: make augmentation_rounds > 1 actually produce more data instead of
+# augmenting N times and discarding all but the first pass
+COPY patches/honour-augmentation-rounds.py /tmp/honour-augmentation-rounds.py
+RUN python3 /tmp/honour-augmentation-rounds.py openwakeword/openwakeword/train.py
+
 # Download embedding models (small, safe to bake into image)
 RUN mkdir -p openwakeword/openwakeword/resources/models \
     && curl -L -o openwakeword/openwakeword/resources/models/embedding_model.onnx \
