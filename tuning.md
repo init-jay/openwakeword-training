@@ -9,7 +9,46 @@ they are.
 
 ---
 
-## What the current model does
+## Results after Priorities 1 and 2
+
+`hey_seeree_aligment_fix.onnx`, measured against the old model on the same harness and
+the same 56 positives (`eval_model.py`, threshold 0.5):
+
+| | old | new | gate |
+|---|---:|---:|---|
+| `extend` + `hey_other` false accepts | 16/32 | **4/32** | < 2/32 |
+| clean positive detection | 53/56 | 51/56 | >= 55/56 |
+| detection, command immediately after | 46/56 | **50/56** | >= 27/30 (90%) |
+| detection, 300 ms pause then command | 52/56 | 50/56 | — |
+| median latency from end of speech | 220 ms | **70 ms** | < 120 ms |
+
+Three of the four moved substantially and latency now passes. Two things are worth
+reading carefully:
+
+**The negatives generalised.** The four surviving false accepts are "hey seriously",
+"hey series", "hey cereal" and "hey searing pain" — the nearest phonetic neighbours of
+the phrase, and none of them were in the training wordlist, which is disjoint from this
+corpus by construction. 13/20 -> 4/20 on `extend` is a real generalisation gain, not
+memorisation. `hey_other` is now 0/12.
+
+**The "trained on quiet" signature is gone.** The 300 ms pause used to recover six
+detections (46 -> 52); it now recovers none (50 -> 50). Priority 3's diagnosis was that
+the model had learned the phrase is followed by silence, and fixing the alignment
+removed that on its own. What remains is a flat 89%, not a gap between two interaction
+styles.
+
+**The cost:** clean positives went 53 -> 51. One of the two newly-missed clips,
+`hey_seeree_0016.wav`, is one of the merged-utterance recordings `check_alignment.py`
+flags as over 2x the median length, so it is bad training data as much as a regression.
+`max_negative_weight` (`train.py`, 2000) is the lever if the model needs loosening.
+
+Remaining work, in order: the four `extend` false accepts are what Priority 3's trailing
+context is supposed to discriminate, and the two merged-utterance recordings should be
+re-recorded or dropped.
+
+---
+
+## What the original model did
 
 | | |
 |---|---|
@@ -225,11 +264,19 @@ python generate_negatives.py \
 Then measure both sides:
 
 ```bash
-python ../openWakeWord/scripts/eval_model.py \
+python eval_model.py \
     --model my_custom_model/hey_seeree.onnx \
     --positives my_real_samples/jay \
     --negatives negatives_tts
 ```
+
+`eval_model.py` streams the model over each clip the way live detection does and
+scores all four gates below. It reproduces the original measurements on the old model
+to within a few points — 93% detection with a 300 ms pause against 93% measured, 220 ms
+median latency against 191 ms, 16/32 adversarial false accepts against 18/32 — except
+clean positives, where it finds 53/56 for a model originally measured at 56/56. Read
+clean-positive counts as a comparison between models under this harness, not against
+that 56/56.
 
 Read the negatives **per category**, not pooled — the corpus is adversarial by
 construction (a fifth of it is phrase-extending), so a pooled false-accept rate is
