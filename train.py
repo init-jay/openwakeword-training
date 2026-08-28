@@ -132,6 +132,45 @@ CONFUSABLE_NEGATIVES = {
 }
 
 
+def report_onnx_providers():
+    """Say plainly whether feature computation will run on the GPU.
+
+    Worth doing because the failure is silent and expensive. onnxruntime falls back
+    to CPU with a warning rather than erroring when the CUDA provider cannot load,
+    and openwakeword picks its thread count from torch rather than onnxruntime - so
+    a box with a working GPU and the CPU build of onnxruntime computes features
+    single-threaded on CPU. That cost 36 minutes of an 83-minute run before anyone
+    noticed the warning in the scrollback.
+
+    Checking `get_available_providers()` alone is not enough: it reports what the
+    build supports, not what will load. So open a real session against the model
+    that will actually be used, and report what it came back with.
+    """
+    try:
+        import onnxruntime
+    except ImportError:
+        print("  onnxruntime not importable - feature computation will fail")
+        return
+
+    available = onnxruntime.get_available_providers()
+    melspec = WORK_DIR / "openwakeword/openwakeword/resources/models/melspectrogram.onnx"
+
+    actual = "CPUExecutionProvider"
+    if "CUDAExecutionProvider" in available and melspec.exists():
+        try:
+            session = onnxruntime.InferenceSession(
+                str(melspec), providers=["CUDAExecutionProvider"])
+            actual = session.get_providers()[0]
+        except Exception as e:
+            print(f"  Could not open a CUDA session: {e}")
+
+    print(f"  onnxruntime {onnxruntime.__version__}, using {actual}")
+    if actual != "CUDAExecutionProvider":
+        print("  WARNING: features will be computed on CPU. This is the slowest stage")
+        print("           of the run. Install onnxruntime-gpu (>=1.19 for CUDA 12) and")
+        print("           make sure cuDNN is on the library path.")
+
+
 def get_kokoro_voices(kokoro_url: str) -> list:
     """Get all available English voices from Kokoro."""
     try:
@@ -576,6 +615,9 @@ def main():
     print(f"Training steps: {args.training_steps}")
     print(f"Layer size: {args.layer_size}")
     print()
+
+    print("[Compute]")
+    report_onnx_providers()
 
     # Get Kokoro voices
     kokoro_voices = get_kokoro_voices(args.kokoro_url)
