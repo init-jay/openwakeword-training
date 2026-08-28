@@ -38,7 +38,7 @@ python train.py --wake-word "hey cal"
 
 **Docker container** handles training (the dependency-heavy part):
 - `train.py` orchestrates the full pipeline
-- Generates positive/negative WAV samples via Kokoro TTS API (67 English voices, speed 0.7-1.3x)
+- Generates positive/negative WAV samples via Kokoro TTS API (~42 English voices of 67 total, speed 0.7-1.3x). Note ~11 of the English voices are `v0` variants of others, so distinct speakers number closer to 30.
 - Copies real voice recordings from mounted `my_real_samples/` (3x weighted)
 - Creates `training_config.yaml` from OpenWakeWord's template
 - Shells out to `openwakeword/openwakeword/train.py --augment_clips` then `--train_model`
