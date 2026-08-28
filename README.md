@@ -179,6 +179,16 @@ Training metrics use synthetic test samples. Real-world performance is usually b
 ### TFLite conversion error at end
 Ignore - the ONNX model is saved successfully before this error.
 
+Run this on the jupyter lab box with tf-lab container
+```bash
+docker compose run --rm \
+    -v ~/openwakeword-training:/oww -w /oww \
+    jupyter bash -c \
+    "pip install -q onnxruntime onnx2tf onnx onnx-graphsurgeon sng4onnx tf_keras psutil ai-edge-litert && \
+     python onnx2tflite.py my_custom_model/hey_seeree.onnx \
+        -o my_custom_model/hey_seeree.tflite"
+```
+
 ## Credits
 
 - [OpenWakeWord](https://github.com/dscripka/openWakeWord) by David Scripka
