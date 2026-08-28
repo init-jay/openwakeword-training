@@ -76,7 +76,28 @@ This reports how far each clip's speech sits from the end of OpenWakeWord's dete
 docker compose run --rm trainer python train.py --wake-word "hey cal" --data-dir /app/data
 ```
 
-Training takes 4-8 hours depending on GPU.
+### Training speed
+
+Measured on an RTX 3090 with 42 Kokoro voices at `--samples-per-voice 300` (~20K positive and ~13K negative clips, 3 augmentation rounds, 50K steps):
+
+| stage | time | share |
+|---|---:|---:|
+| TTS generation (2 Kokoro containers) | ~17 min | 49% |
+| Feature computation (GPU) | ~4 min | 11% |
+| Model training | ~14 min | 40% |
+| **total** | **~35 min** | |
+
+How it got there, since the defaults matter:
+
+| | total |
+|---|---:|
+| CPU feature computation, 1 Kokoro | 83 min |
+| + `onnxruntime-gpu` (features 36 → 4 min) | 52 min |
+| + a second Kokoro container (TTS 34 → 17 min) | 35 min |
+
+**Why more than one Kokoro container:** a Kokoro process is single-threaded and saturates exactly one core, so concurrent requests to one instance simply queue (4 client threads measured 15.0 it/s against 14.1 sequential) while adding instances scales almost linearly (2 instances: 28.7 it/s) — the GPU sits at ~21% throughout, so cores, not the GPU, are the limit.
+
+`docker-compose.yml` ships two. Add more by copying the `kokoro2` block and appending to `KOKORO_URL`, keeping at least one core free for the trainer; check `nproc` first. Past ~3 instances TTS stops being the slowest stage and the whole-run saving flattens out.
 
 ### 5. Test Your Model
 
@@ -95,18 +116,22 @@ Speak your wake word into the microphone and watch for detections. Capture goes 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `--wake-word` | "hey cal" | The wake word/phrase to detect |
-| `--samples-per-voice` | 200 | Samples generated per Kokoro voice |
-| `--training-steps` | 50000 | More steps = better but slower |
+| `--samples-per-voice` | 300 | Samples generated per Kokoro voice |
+| `--training-steps` | 50000 | More steps = better but slower (~14 min per 50K) |
 | `--layer-size` | 64 | Network size (32, 64, or 128) |
-| `--kokoro-url` | http://localhost:8880 | Kokoro TTS endpoint |
+| `--kokoro-url` | http://localhost:8880 | Kokoro TTS endpoint. Comma-separate several to split the work across them |
+| `--tts-workers` | 2 | Concurrent requests **per server**; total is this times the server count |
+| `--augmentation-rounds` | 3 | Differently-augmented copies of each clip. Multiplies training data at no TTS cost |
+| `--runon-fraction` | 0.4 | Share of positives where the phrase runs straight into a command rather than silence |
 | `--data-dir` | `.` | Training data directory (`/app/data` for Docker) |
 | `--no-trim` | off | Skip silence trimming before augmentation (not recommended) |
+| `--negatives-file` | — | Confusable negative phrases for a wake word with no built-in list |
 
 ## How It Works
 
-1. **Sample Generation** - Creates ~13K positive samples using 67 Kokoro voices with speed variation (0.7-1.3x), plus your real recordings (weighted 3x)
+1. **Sample Generation** - Creates ~20K positive samples using ~42 English Kokoro voices with speed variation (0.7-1.3x), plus your real recordings (weighted 3x). A configurable share (40%) are "run-on" positives where the phrase flows straight into a command, cut just after the wake word using Kokoro's word timestamps
 
-2. **Negative Samples** - Generates samples of clearly different phrases ("hello", "hey siri", "alexa") to teach the model what NOT to detect
+2. **Negative Samples** - Generates both clearly-different phrases ("hello", "alexa") and near-misses of the wake word, plus the commands used in the run-on positives on their own
 
 3. **Silence Trimming** - Strips leading/trailing silence from all samples so speech lands where the model expects it (see below)
 
@@ -116,7 +141,9 @@ Speak your wake word into the microphone and watch for detections. Capture goes 
 
 ### Key Insight
 
-**Don't use similar-sounding negatives.** Training on phrases like "hey call" or "hey carl" actually hurts performance. Use only clearly different phrases like "hello", "hey siri", "alexa".
+**Do use similar-sounding negatives** — this reverses earlier advice in this README, which measurement contradicted. A model trained only on clearly-different phrases rejects exactly what it was shown and nothing adjacent: it scored 0/8 on other assistants' wake words and 0/36 on general conversation, but false-accepted 13/20 on the phrase continuing into another word ("hey serious" → 0.995) and 5/12 on "hey" plus a different name. Adding near-misses to the wordlist cut that to 4/20 on held-out confusables.
+
+`train.py` keeps these in `CONFUSABLE_NEGATIVES`, keyed by wake word; use `--negatives-file` for a phrase with no built-in list. It warns if you train without any. See `tuning.md` for the full measurements.
 
 ### Why Silence Trimming Matters
 
