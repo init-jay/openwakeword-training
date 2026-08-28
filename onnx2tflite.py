@@ -26,11 +26,18 @@ def convert(onnx_path: Path, out_path: Path, trials: int = 5, tol: float = 1e-4)
     workdir = Path(tempfile.mkdtemp())
     try:
         print("==> onnx2tf")
-        subprocess.run(
+        # Output is captured because onnx2tf is extremely chatty on success, but it
+        # has to be re-emitted on failure - swallowing it leaves a CalledProcessError
+        # with no indication of what went wrong.
+        result = subprocess.run(
             ["onnx2tf", "-i", str(onnx_path), "-o", str(workdir / "sm"), "-nuo", "-osd"],
-            check=True,
             capture_output=True,
+            text=True,
         )
+        if result.returncode != 0:
+            print(result.stdout[-4000:], file=sys.stderr)
+            print(result.stderr[-4000:], file=sys.stderr)
+            raise SystemExit(f"FAILED: onnx2tf exited {result.returncode} (output above)")
 
         sess = ort.InferenceSession(str(onnx_path))
         name = sess.get_inputs()[0].name
