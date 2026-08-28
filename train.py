@@ -12,11 +12,13 @@ Docker:
 
 import argparse
 import base64
+import concurrent.futures as cf
 import io
 import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 import warnings
@@ -62,6 +64,9 @@ TRAINING_COMMANDS = [
 # fallback path can cache its phrase-alone reference per (voice, speed); the
 # primary path gets the boundary from the server and would not need this.
 RUNON_SPEEDS = [0.8, 0.9, 1.0, 1.1, 1.2]
+
+# Speed range for every non-run-on Kokoro rendering.
+PLAIN_SPEEDS = (0.7, 1.3)
 
 # How much of the command's onset to keep after the wake word ends, in ms.
 #
@@ -281,9 +286,12 @@ def phrase_end_sample(timestamps, wake_word: str, sr: int = 16000):
     return int(end * sr) if end else None
 
 
-def generate_kokoro_sample(kokoro_url: str, voice: str, text: str, output_dir: Path) -> bool:
-    """Generate a single Kokoro TTS sample with speed variation."""
-    data = kokoro_tts(kokoro_url, voice, text, np.random.uniform(0.7, 1.3))
+def generate_kokoro_sample(kokoro_url: str, voice: str, text: str, output_dir: Path,
+                           speed: float = None) -> bool:
+    """Generate a single Kokoro TTS sample."""
+    if speed is None:
+        speed = np.random.uniform(*PLAIN_SPEEDS)
+    data = kokoro_tts(kokoro_url, voice, text, speed)
     if data is None:
         return False
     filename = f"kokoro_{uuid.uuid4().hex}.wav"
@@ -291,29 +299,58 @@ def generate_kokoro_sample(kokoro_url: str, voice: str, text: str, output_dir: P
     return True
 
 
+def run_jobs(jobs, worker, desc: str, workers: int):
+    """Run `worker` over `jobs` in a thread pool, with a progress bar.
+
+    Threads rather than processes because every job is a blocking HTTP request to
+    the TTS server - the work happens there, not here. The pool size is really a
+    concurrency limit on the server: measured throughput rises from ~7 to ~11.5
+    calls/s going from 1 to 4 workers and is flat at 8, so the server saturates
+    early and more workers would only queue.
+    """
+    def guarded(job):
+        # One transient failure must not abandon a batch that takes tens of minutes.
+        # pool.map re-raises on iteration, so swallow here and count it as a miss;
+        # the caller already reports success against the job total.
+        try:
+            return worker(job)
+        except Exception:
+            return False
+
+    success = 0
+    with tqdm(total=len(jobs), desc=desc) as pbar:
+        with cf.ThreadPoolExecutor(max_workers=workers) as pool:
+            for result in pool.map(guarded, jobs):
+                success += bool(result)
+                pbar.update(1)
+    return success
+
+
 def generate_kokoro_samples(kokoro_url: str, voices: list, output_dir: Path,
-                           samples_per_voice: int, texts: list, desc: str):
+                            samples_per_voice: int, texts: list, desc: str,
+                            workers: int = 4):
     """Generate Kokoro samples for all voices."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    total = samples_per_voice * len(voices)
-    pbar = tqdm(total=total, desc=desc)
-    success = 0
 
-    # Offset each voice's starting point in the wordlist. Without it every voice
-    # renders texts[0:samples_per_voice], so a list longer than samples_per_voice
-    # never gets past its own beginning - which the test sets hit as soon as the
-    # negative list grew past samples_per_voice // 10 phrases.
+    # The job list is built up front, in one thread. Drawing the speed here rather
+    # than inside the worker keeps the corpus a function of the seed alone, instead
+    # of depending on the order threads happen to run in.
+    jobs = []
     for v, voice in enumerate(voices):
         for i in range(samples_per_voice):
+            # Offset each voice's starting point in the wordlist. Without it every
+            # voice renders texts[0:samples_per_voice], so a list longer than
+            # samples_per_voice never gets past its own beginning - which the test
+            # sets hit as soon as the negative list grew past samples_per_voice//10.
             text = texts[(v * samples_per_voice + i) % len(texts)]
-            if generate_kokoro_sample(kokoro_url, voice, text, output_dir):
-                success += 1
-            pbar.update(1)
-            if i % 20 == 0:
-                time.sleep(0.05)
+            jobs.append((voice, text, float(np.random.uniform(*PLAIN_SPEEDS))))
 
-    pbar.close()
-    print(f"  Generated {success}/{total} samples")
+    success = run_jobs(
+        jobs,
+        lambda job: generate_kokoro_sample(kokoro_url, job[0], job[1], output_dir, job[2]),
+        desc, workers)
+
+    print(f"  Generated {success}/{len(jobs)} samples")
     return success
 
 
@@ -368,7 +405,7 @@ def build_negative_phrases(wake_word: str, negatives_file: str = None,
 
 def generate_runon_samples(kokoro_url: str, voices: list, output_dir: Path,
                            per_voice: int, wake_word: str, desc: str,
-                           reference: dict = None):
+                           reference: dict = None, workers: int = 4):
     """Positives where the phrase runs straight into a command.
 
     The model measured in tuning.md detects 97% of "hey seeree, what's the time?"
@@ -392,52 +429,60 @@ def generate_runon_samples(kokoro_url: str, voices: list, output_dir: Path,
     which is the intent, and the jitter on top of it is deliberate.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    total = per_voice * len(voices)
-    pbar = tqdm(total=total, desc=desc)
     reference = {} if reference is None else reference
-    success = fallbacks = 0
+    # The fallback cache is read and written from several threads, and a miss costs
+    # a TTS call, so guard it rather than racing to make the same call twice.
+    reference_lock = threading.Lock()
+    fallbacks = []
 
+    jobs = []
     for voice in voices:
         for i in range(per_voice):
-            speed = RUNON_SPEEDS[i % len(RUNON_SPEEDS)]
-            command = TRAINING_COMMANDS[(i // len(RUNON_SPEEDS)) % len(TRAINING_COMMANDS)]
+            jobs.append((
+                voice,
+                RUNON_SPEEDS[i % len(RUNON_SPEEDS)],
+                TRAINING_COMMANDS[(i // len(RUNON_SPEEDS)) % len(TRAINING_COMMANDS)],
+                int(16000 * np.random.uniform(*RUNON_TAIL_MS) / 1000),
+            ))
 
-            text = f"{wake_word} {command}"
-            tail = int(16000 * np.random.uniform(*RUNON_TAIL_MS) / 1000)
+    def render(job):
+        voice, speed, command, tail = job
+        text = f"{wake_word} {command}"
 
-            # Preferred path: the server tells us where the wake word ends.
-            data, timestamps = kokoro_tts_timed(kokoro_url, voice, text, speed)
-            cut = phrase_end_sample(timestamps, wake_word) if data is not None else None
+        # Preferred path: the server tells us where the wake word ends.
+        data, timestamps = kokoro_tts_timed(kokoro_url, voice, text, speed)
+        cut = phrase_end_sample(timestamps, wake_word) if data is not None else None
 
-            if cut is None:
-                # Fallback for a server without /dev/captioned_speech: infer the
-                # boundary from a phrase-alone rendering, cached per (voice, speed).
-                # Less accurate - it cannot see the coarticulation - so it errs on
-                # the late side rather than risk cutting into the wake word.
-                if data is None:
-                    data = kokoro_tts(kokoro_url, voice, text, speed)
-                key = (voice, speed)
+        if cut is None:
+            # Fallback for a server without /dev/captioned_speech: infer the
+            # boundary from a phrase-alone rendering, cached per (voice, speed).
+            # Measured at a median +153 ms late and voice-dependent, so it is a
+            # degraded mode rather than an equivalent one.
+            if data is None:
+                data = kokoro_tts(kokoro_url, voice, text, speed)
+            key = (voice, speed)
+            with reference_lock:
                 if key not in reference:
                     alone = kokoro_tts(kokoro_url, voice, wake_word, speed)
                     reference[key] = len(trim_silence(alone)) if alone is not None else None
-                if data is not None and reference[key]:
-                    data = trim_silence(data)
-                    cut = reference[key] - int(16000 * 30.0 / 1000)   # drop the trim pad
-                    fallbacks += 1
+                phrase_len = reference[key]
+            if data is not None and phrase_len:
+                data = trim_silence(data)
+                cut = phrase_len - int(16000 * 30.0 / 1000)   # drop the trim pad
+                fallbacks.append(1)
 
-            if data is not None and cut:
-                data = data[:cut + tail] if cut + tail < len(data) else data
-                filename = f"runon_{uuid.uuid4().hex}.wav"
-                scipy.io.wavfile.write(str(output_dir / filename), 16000, data)
-                success += 1
-            pbar.update(1)
-            if i % 20 == 0:
-                time.sleep(0.05)
+        if data is None or not cut:
+            return False
+        data = data[:cut + tail] if cut + tail < len(data) else data
+        scipy.io.wavfile.write(str(output_dir / f"runon_{uuid.uuid4().hex}.wav"),
+                               16000, data)
+        return True
 
-    pbar.close()
-    print(f"  Generated {success}/{total} run-on samples")
+    success = run_jobs(jobs, render, desc, workers)
+
+    print(f"  Generated {success}/{len(jobs)} run-on samples")
     if fallbacks:
-        print(f"  NOTE: {fallbacks} clip(s) fell back to the phrase-alone estimate "
+        print(f"  NOTE: {len(fallbacks)} clip(s) fell back to the phrase-alone estimate "
               f"({len(reference)} reference renderings).")
         print("        /dev/captioned_speech was unavailable or its words did not match")
         print("        the wake phrase, so those cuts sit later than they should.")
@@ -667,6 +712,9 @@ def main():
                         help="Text file of confusable negative phrases, one per line "
                              "(# comments allowed). Overrides the built-in list for "
                              "this wake word; base negatives are always included.")
+    parser.add_argument("--tts-workers", type=int, default=4,
+                        help="Concurrent Kokoro requests (default: %(default)s). The "
+                             "server saturates around 4; more only queues.")
     parser.add_argument("--augmentation-rounds", type=int, default=3,
                         help="How many differently-augmented copies of each clip to "
                              "compute features for (default: %(default)s). Multiplies "
@@ -738,18 +786,22 @@ def main():
     print(f"  Per voice: {plain_train} phrase-alone, {runon_train} run-on "
           f"({args.runon_fraction:.0%})")
     generate_kokoro_samples(args.kokoro_url, kokoro_voices, pos_train,
-                           plain_train, positive_texts, "Kokoro positive train")
+                            plain_train, positive_texts, "Kokoro positive train",
+                            args.tts_workers)
     generate_kokoro_samples(args.kokoro_url, kokoro_voices, pos_test,
-                           plain_test, positive_texts, "Kokoro positive test")
+                            plain_test, positive_texts, "Kokoro positive test",
+                            args.tts_workers)
 
     if runon_train:
         # One reference cache across both sets: the phrase-alone lengths are the
         # same, and rebuilding it would cost a few hundred needless TTS calls.
         reference = {}
         generate_runon_samples(args.kokoro_url, kokoro_voices, pos_train,
-                               runon_train, wake_word, "Kokoro run-on train", reference)
+                               runon_train, wake_word, "Kokoro run-on train",
+                               reference, args.tts_workers)
         generate_runon_samples(args.kokoro_url, kokoro_voices, pos_test,
-                               runon_test, wake_word, "Kokoro run-on test", reference)
+                               runon_test, wake_word, "Kokoro run-on test",
+                               reference, args.tts_workers)
 
     print("\n[Real Voice]")
     real_count = copy_real_samples(wake_word, pos_train)
@@ -763,9 +815,11 @@ def main():
 
     print("\n[Kokoro TTS]")
     generate_kokoro_samples(args.kokoro_url, kokoro_voices, neg_train,
-                           args.samples_per_voice, negative_phrases, "Kokoro negative train")
+                            args.samples_per_voice, negative_phrases,
+                            "Kokoro negative train", args.tts_workers)
     generate_kokoro_samples(args.kokoro_url, kokoro_voices, neg_test,
-                           args.samples_per_voice // 10, negative_phrases, "Kokoro negative test")
+                            args.samples_per_voice // 10, negative_phrases,
+                            "Kokoro negative test", args.tts_workers)
 
     # === COUNT SAMPLES ===
     n_pos_train = len(list(pos_train.glob("*.wav")))
