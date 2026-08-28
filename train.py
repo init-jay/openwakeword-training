@@ -176,6 +176,77 @@ def report_onnx_providers():
         print("           make sure cuDNN is on the library path.")
 
 
+class KokoroPool:
+    """Hands out TTS server URLs round-robin, so several servers share the work.
+
+    Worth the trouble because one Kokoro process is single-threaded: measured at
+    101.8% CPU (exactly one core) while the GPU sat at 21% and VRAM at 1.5 of 24 GB.
+    Extra client threads against one server therefore just queue - four workers
+    against one server measured 15.0 it/s versus 14.1 sequential. Extra *processes*
+    are what scale, until the cores run out.
+
+    Round-robin per job rather than a static split by index, so it self-balances:
+    a thread that draws a slow server holds it longer and completes fewer jobs,
+    instead of that server becoming a straggler at the end of the batch.
+    """
+
+    def __init__(self, urls):
+        self.urls = [u.strip().rstrip("/") for u in urls if u.strip()]
+        self._i = 0
+        self._lock = threading.Lock()
+
+    def next(self) -> str:
+        if len(self.urls) == 1:
+            return self.urls[0]
+        with self._lock:
+            url = self.urls[self._i % len(self.urls)]
+            self._i += 1
+            return url
+
+    def __len__(self):
+        return len(self.urls)
+
+
+def probe_kokoro_servers(pool: KokoroPool) -> list:
+    """Report each server, drop the dead ones, and return the voices they all share.
+
+    Servers are only interchangeable if they agree on the voice list - asking a
+    server for a voice it lacks fails that job - so the intersection is used.
+    Timestamp support is probed too: a server without /dev/captioned_speech pushes
+    run-on clips onto the degraded phrase-alone estimate, which is the exact bug
+    that cost two training runs, and it would otherwise do so silently.
+    """
+    voices_per_server = []
+    for url in pool.urls:
+        try:
+            r = requests.get(f"{url}/v1/audio/voices", timeout=10)
+            voices = r.json().get("voices", [])
+            voices = [v["id"] if isinstance(v, dict) else v for v in voices]
+            english = {v for v in voices if v.startswith(('af_', 'am_', 'bf_', 'bm_'))}
+        except Exception as e:
+            print(f"  {url}: UNREACHABLE ({e})")
+            voices_per_server.append(set())
+            continue
+
+        _, timestamps = kokoro_tts_timed(url, sorted(english)[0], "test", 1.0)
+        timed = "timestamps" if timestamps else "NO timestamps (run-ons degraded)"
+        print(f"  {url}: {len(english)} English voices, {timed}")
+        voices_per_server.append(english)
+
+    live = [(u, v) for u, v in zip(pool.urls, voices_per_server) if v]
+    if not live:
+        print("ERROR: no usable Kokoro servers")
+        sys.exit(1)
+
+    pool.urls = [u for u, _ in live]
+    shared = set.intersection(*[v for _, v in live])
+    union = set.union(*[v for _, v in live])
+    if shared != union:
+        print(f"  NOTE: servers disagree on {len(union - shared)} voice(s); "
+              f"using the {len(shared)} they share")
+    return sorted(shared)
+
+
 def get_kokoro_voices(kokoro_url: str) -> list:
     """Get all available English voices from Kokoro."""
     try:
@@ -326,9 +397,9 @@ def run_jobs(jobs, worker, desc: str, workers: int):
     return success
 
 
-def generate_kokoro_samples(kokoro_url: str, voices: list, output_dir: Path,
+def generate_kokoro_samples(pool: "KokoroPool", voices: list, output_dir: Path,
                             samples_per_voice: int, texts: list, desc: str,
-                            workers: int = 4):
+                            workers: int = 2):
     """Generate Kokoro samples for all voices."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -347,8 +418,8 @@ def generate_kokoro_samples(kokoro_url: str, voices: list, output_dir: Path,
 
     success = run_jobs(
         jobs,
-        lambda job: generate_kokoro_sample(kokoro_url, job[0], job[1], output_dir, job[2]),
-        desc, workers)
+        lambda job: generate_kokoro_sample(pool.next(), job[0], job[1], output_dir, job[2]),
+        desc, workers * len(pool))
 
     print(f"  Generated {success}/{len(jobs)} samples")
     return success
@@ -403,9 +474,9 @@ def build_negative_phrases(wake_word: str, negatives_file: str = None,
     return [p for p in phrases if not (p.lower() in seen or seen.add(p.lower()))]
 
 
-def generate_runon_samples(kokoro_url: str, voices: list, output_dir: Path,
+def generate_runon_samples(pool: "KokoroPool", voices: list, output_dir: Path,
                            per_voice: int, wake_word: str, desc: str,
-                           reference: dict = None, workers: int = 4):
+                           reference: dict = None, workers: int = 2):
     """Positives where the phrase runs straight into a command.
 
     The model measured in tuning.md detects 97% of "hey seeree, what's the time?"
@@ -448,6 +519,7 @@ def generate_runon_samples(kokoro_url: str, voices: list, output_dir: Path,
     def render(job):
         voice, speed, command, tail = job
         text = f"{wake_word} {command}"
+        kokoro_url = pool.next()
 
         # Preferred path: the server tells us where the wake word ends.
         data, timestamps = kokoro_tts_timed(kokoro_url, voice, text, speed)
@@ -478,7 +550,7 @@ def generate_runon_samples(kokoro_url: str, voices: list, output_dir: Path,
                                16000, data)
         return True
 
-    success = run_jobs(jobs, render, desc, workers)
+    success = run_jobs(jobs, render, desc, workers * len(pool))
 
     print(f"  Generated {success}/{len(jobs)} run-on samples")
     if fallbacks:
@@ -704,7 +776,10 @@ def main():
     parser.add_argument("--training-steps", type=int, default=50000, help="Number of training steps")
     parser.add_argument("--layer-size", type=int, default=64, choices=[32, 64, 128], help="Network layer size")
     parser.add_argument("--kokoro-url", default=os.environ.get("KOKORO_URL", "http://localhost:8880"),
-                        help="Kokoro TTS URL")
+                        help="Kokoro TTS URL. Comma-separate several to split the work "
+                             "across them: one Kokoro process is single-threaded and "
+                             "saturates one core, so more PROCESSES scale where more "
+                             "client threads do not.")
     parser.add_argument("--data-dir", default=".", help="Directory containing training data (features, audioset, fma, mit_rirs)")
     parser.add_argument("--no-trim", action="store_true",
                         help="Skip silence trimming before augmentation (not recommended)")
@@ -712,9 +787,11 @@ def main():
                         help="Text file of confusable negative phrases, one per line "
                              "(# comments allowed). Overrides the built-in list for "
                              "this wake word; base negatives are always included.")
-    parser.add_argument("--tts-workers", type=int, default=4,
-                        help="Concurrent Kokoro requests (default: %(default)s). The "
-                             "server saturates around 4; more only queues.")
+    parser.add_argument("--tts-workers", type=int, default=2,
+                        help="Concurrent requests PER SERVER (default: %(default)s). "
+                             "A Kokoro process handles one at a time, so this only "
+                             "covers the gap between responses; total concurrency is "
+                             "this times the number of servers.")
     parser.add_argument("--augmentation-rounds", type=int, default=3,
                         help="How many differently-augmented copies of each clip to "
                              "compute features for (default: %(default)s). Multiplies "
@@ -741,10 +818,13 @@ def main():
     report_onnx_providers()
 
     # Get Kokoro voices
-    kokoro_voices = get_kokoro_voices(args.kokoro_url)
+    print("\n[Kokoro servers]")
+    pool = KokoroPool(args.kokoro_url.split(","))
+    kokoro_voices = probe_kokoro_servers(pool)
     if not kokoro_voices:
         print("ERROR: No Kokoro voices available!")
         sys.exit(1)
+    print(f"  {len(pool)} server(s), {len(kokoro_voices)} shared English voices")
 
     # Setup directories
     base_dir = setup_training_dirs(wake_word)
@@ -785,10 +865,10 @@ def main():
     print("\n[Kokoro TTS]")
     print(f"  Per voice: {plain_train} phrase-alone, {runon_train} run-on "
           f"({args.runon_fraction:.0%})")
-    generate_kokoro_samples(args.kokoro_url, kokoro_voices, pos_train,
+    generate_kokoro_samples(pool, kokoro_voices, pos_train,
                             plain_train, positive_texts, "Kokoro positive train",
                             args.tts_workers)
-    generate_kokoro_samples(args.kokoro_url, kokoro_voices, pos_test,
+    generate_kokoro_samples(pool, kokoro_voices, pos_test,
                             plain_test, positive_texts, "Kokoro positive test",
                             args.tts_workers)
 
@@ -796,10 +876,10 @@ def main():
         # One reference cache across both sets: the phrase-alone lengths are the
         # same, and rebuilding it would cost a few hundred needless TTS calls.
         reference = {}
-        generate_runon_samples(args.kokoro_url, kokoro_voices, pos_train,
+        generate_runon_samples(pool, kokoro_voices, pos_train,
                                runon_train, wake_word, "Kokoro run-on train",
                                reference, args.tts_workers)
-        generate_runon_samples(args.kokoro_url, kokoro_voices, pos_test,
+        generate_runon_samples(pool, kokoro_voices, pos_test,
                                runon_test, wake_word, "Kokoro run-on test",
                                reference, args.tts_workers)
 
@@ -814,10 +894,10 @@ def main():
     print("=" * 60)
 
     print("\n[Kokoro TTS]")
-    generate_kokoro_samples(args.kokoro_url, kokoro_voices, neg_train,
+    generate_kokoro_samples(pool, kokoro_voices, neg_train,
                             args.samples_per_voice, negative_phrases,
                             "Kokoro negative train", args.tts_workers)
-    generate_kokoro_samples(args.kokoro_url, kokoro_voices, neg_test,
+    generate_kokoro_samples(pool, kokoro_voices, neg_test,
                             args.samples_per_voice // 10, negative_phrases,
                             "Kokoro negative test", args.tts_workers)
 

@@ -1,15 +1,28 @@
+# A Kokoro process is single-threaded: measured at 101.8% CPU (one core) while the
+# GPU sat at 21% and VRAM at 1.5 of 24 GB. Concurrent requests to one instance
+# therefore just queue - 4 client threads measured 15.0 it/s against 14.1 sequential.
+# More INSTANCES scale, roughly linearly, until the cores run out. Run `nproc` and
+# leave a core or two for the trainer, then add or remove kokoroN services to match.
+x-kokoro: &kokoro
+  image: ghcr.io/remsky/kokoro-fastapi-gpu:latest
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
 services:
   kokoro:
-    image: ghcr.io/remsky/kokoro-fastapi-gpu:latest
+    <<: *kokoro
     ports:
       - "8880:8880"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+
+  kokoro2:
+    <<: *kokoro
+    ports:
+      - "8881:8880"
 
   trainer:
     build: .
@@ -25,7 +38,9 @@ services:
       - ./my_real_samples:/app/my_real_samples
       - ./my_custom_model:/app/my_custom_model
     environment:
-      - KOKORO_URL=http://kokoro:8880
+      # Both instances; each is a separate single-threaded process.
+      - KOKORO_URL=http://kokoro:8880,http://kokoro2:8880
     depends_on:
       - kokoro
+      - kokoro2
     shm_size: "8gb"
