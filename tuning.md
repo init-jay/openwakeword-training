@@ -9,6 +9,52 @@ they are.
 
 ---
 
+## Run 3: run-on positives, more data — and an alignment regression
+
+`hey_seeree_ee215d8e...onnx`, the first run with run-on positives, `samples_per_voice`
+300 and `augmentation_rounds` 3:
+
+| | run 2 | run 3 | gate |
+|---|---:|---:|---|
+| `extend` + `hey_other` false accepts | 4/32 | 7/32 | < 2/32 |
+| clean positive detection | 51/56 | 53/56 | >= 55/56 |
+| detection, command immediately after | 50/56 | **54/56 (96%)** | >= 90% **PASS** |
+| median latency | 70 ms | 130 ms | < 120 ms |
+| alignment peak | 160 ms | **480 ms** | ~180 ms |
+
+**The run-on positives worked.** The command gate passes for the first time, 89% -> 96%.
+
+**But the cut point was wrong and it undid Priority 2.** The alignment peak went back to
+480 ms, exactly where the original pre-trimming model sat. Two errors compounded, both
+in `generate_runon_samples`:
+
+* `phrase_len` came from `trim_silence`, which carries a 30 ms trailing pad that was
+  treated as the phrase's end.
+* The phrase is shorter inside the run-on than alone, because its final syllable is
+  coarticulated into the next word. Measured across voices and speeds: **median 190 ms**
+  (range 0-350 ms). The first version noted this and called it "the intent", then added
+  U(50, 250) ms on top of it.
+
+Together the cut kept **270-470 ms** of command audio where plain positives keep ~80 ms.
+With `end_jitter` U(0, 200) on top, the phrase landed a median ~470 ms from the window
+end. The positive set was bimodal and the model learned the later mode.
+
+That also explains the false-accept regression. When the trailing region holds command
+speech in the positives and the continuation of "hey serious" in the negatives, it stops
+discriminating anything, so the model learns to ignore it - and trailing context is
+exactly what separates the phrase from its extensions.
+
+**Fixed** by subtracting the pad and cutting the jitter to U(0, 100) ms. The remaining
+overshoot is the coarticulation difference, which cannot be measured per clip and is
+left as the tail's natural variation. Deliberately not corrected further: a too-large
+correction would cut into the wake word and corrupt the positive, which is far worse
+than being slightly late. Verified on generated clips - median 839 ms, down from 965 ms.
+
+Expect the next run to put the peak near 200 ms rather than 160, since run-on positives
+still sit a little later than plain ones. That is the price of the command gate.
+
+---
+
 ## Results after Priorities 1 and 2
 
 `hey_seeree_aligment_fix.onnx`, measured against the old model on the same harness and
