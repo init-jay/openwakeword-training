@@ -9,6 +9,34 @@ they are.
 
 ---
 
+## Run 5 (in flight): `705c23b`
+
+Two changes against run 4:
+
+* **Timestamp-exact run-on cut.** The boundary now comes from Kokoro's
+  `/dev/captioned_speech` word timestamps instead of a phrase-alone estimate,
+  removing a median +153 ms bias that was also voice-dependent (`af_bella` ~0 ms,
+  `bf_lily` +348..+459 ms) and occasionally cut inside the wake word.
+* **Parallel TTS generation.** Throughput only - but note it changes the *corpus*,
+  not just the speed: speeds are drawn up front in the main thread, so the sequence
+  of random draws differs from the sequential version even at the same seed. Not a
+  bias, just different clips.
+
+Speed range deliberately unchanged at U(0.7, 1.3), so speed 1.40/1.60 should still
+fail. That keeps it available as the next single-variable experiment.
+
+What to expect:
+
+* firing band tightening from 120-320 ms back toward 80-240 ms, as the +153 ms bias
+  on 40% of the positives goes away
+* `cmd_run` holding at 36/36 - only where the run-on clips are cut changed, not why
+  they exist
+* `extend` false accepts *possibly* recovering some of the 4/32 -> 6/32 regression,
+  because the trailing region no longer carries an extra ~150 ms of command speech.
+  A mechanism, not a prediction; 6/32 holding would be an equally sensible result.
+
+---
+
 ## Run 4: `9151908` — alignment recovered, Priority 3 solved
 
 | | run 2 | run 3 | run 4 | gate |

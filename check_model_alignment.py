@@ -21,8 +21,12 @@ into training - untrimmed Kokoro output sits about there (see tuning.md, Priorit
 The peak also *is* the latency: the model cannot fire until that much audio has
 arrived after you stop speaking.
 
-Needs onnxruntime and an importable openwakeword, so unlike `check_alignment.py`
-this does not run on a bare host. Easiest inside the trainer container:
+Takes either the .onnx or the .tflite. Prefer the .tflite when that is what you
+deploy: a wrong-axis conversion loads cleanly and returns plausible scores while
+detecting nothing, so the artifact that ships is the one worth measuring.
+
+Needs onnxruntime (and ai-edge-litert for .tflite) plus an importable openwakeword,
+so unlike `check_alignment.py` this does not run on a bare host. Easiest inside the trainer container:
 
     docker compose run --rm \\
         -v $(pwd)/check_model_alignment.py:/app/check_model_alignment.py \\
@@ -126,21 +130,74 @@ def place(clip, gap_ms, total_length, noise_floor, rng):
     return window
 
 
-def score_windows(windows, features, session, batched):
+class WakeWordModel:
+    """One interface over an .onnx or .tflite wake-word model.
+
+    Scoring the tflite matters because it is what actually ships. The ONNX and the
+    tflite are not guaranteed to agree - a wrong-axis conversion loads cleanly,
+    reports a plausible input shape and returns plausible 0-1 scores while detecting
+    nothing (see onnx2tflite.py). Measuring the artifact you deploy removes that
+    whole class of surprise, and skips a conversion step when iterating.
+    """
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.kind = "tflite" if self.path.suffix == ".tflite" else "onnx"
+
+        if self.kind == "tflite":
+            # Same import openwakeword uses (model.py:114), so a model that loads
+            # here loads there.
+            from ai_edge_litert.interpreter import Interpreter
+            self._interp = Interpreter(model_path=str(self.path))
+            self._interp.allocate_tensors()
+            self._in = self._interp.get_input_details()[0]
+            self._out = self._interp.get_output_details()[0]
+            self.shape = [int(d) for d in self._in["shape"]]
+        else:
+            self._session = ort.InferenceSession(
+                str(self.path), providers=["CPUExecutionProvider"])
+            self._name = self._session.get_inputs()[0].name
+            self.shape = self._session.get_inputs()[0].shape
+
+    @property
+    def batched(self):
+        """Whether the model accepts more than one example at a time."""
+        first = self.shape[0]
+        return not isinstance(first, int) or first != 1
+
+    def predict(self, embeddings):
+        """Score a stack of (frames, dim) embeddings, returning one value each."""
+        if self.kind == "tflite":
+            scores = []
+            for e in embeddings:
+                self._interp.set_tensor(self._in["index"],
+                                        e[None, :, :].astype(np.float32))
+                self._interp.invoke()
+                scores.append(float(self._interp.get_tensor(self._out["index"]).item()))
+            return np.array(scores)
+
+        if self.batched:
+            return self._session.run(
+                None, {self._name: embeddings.astype(np.float32)})[0].reshape(-1)
+        # Exported with a fixed batch dimension of 1: one at a time.
+        return np.array([
+            self._session.run(None, {self._name: e[None, :, :].astype(np.float32)})[0].item()
+            for e in embeddings])
+
+
+def score_windows(windows, features, model):
     embeddings = features.embed_clips(np.stack(windows), batch_size=64)
-    name = session.get_inputs()[0].name
-    if batched:
-        return session.run(None, {name: embeddings.astype(np.float32)})[0].reshape(-1)
-    # Models exported with a fixed batch dimension of 1 have to go one at a time.
-    return np.array([session.run(None, {name: e[None, :, :].astype(np.float32)})[0].item()
-                     for e in embeddings])
+    return model.predict(embeddings)
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Measure the window alignment a trained model prefers",
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--model", required=True, help="Trained .onnx model")
+    parser.add_argument("--model", required=True,
+                        help="Trained .onnx or .tflite model. Prefer the .tflite "
+                             "if that is what you deploy - the two are not "
+                             "guaranteed to agree.")
     parser.add_argument("--positives", nargs="+", default=["my_real_samples"],
                         help="Directories of positive clips (searched recursively)")
     parser.add_argument("--total-length", type=int, default=32000,
@@ -160,9 +217,8 @@ def main():
     # Imported here so --help works without openwakeword installed.
     from openwakeword.utils import AudioFeatures
 
-    session = ort.InferenceSession(args.model, providers=["CPUExecutionProvider"])
-    model_input = session.get_inputs()[0].shape
-    batched = not isinstance(model_input[0], int) or model_input[0] != 1
+    model = WakeWordModel(args.model)
+    model_input = model.shape
     features = AudioFeatures(device="cpu")
 
     expected = features.get_embedding_shape(args.total_length / SR)[0]
@@ -179,7 +235,7 @@ def main():
     lengths = np.array([len(c) / SR * 1000 for _, c in clips])
 
     print("=" * 66)
-    print(f"{Path(args.model).name}   input {model_input}")
+    print(f"{Path(args.model).name}   {model.kind}, input {model_input}")
     print(f"{len(clips)} clips from {', '.join(args.positives)}"
           f"{'' if args.no_trim else ' (trimmed as train.py does)'}")
     print(f"Window: {args.total_length} samples ({args.total_length / SR:.2f}s), "
@@ -194,7 +250,7 @@ def main():
         windows = [w for w in (place(c, gap, args.total_length, args.noise_floor, rng)
                                for _, c in clips) if w is not None]
         if windows:
-            preds = score_windows(windows, features, session, batched)
+            preds = score_windows(windows, features, model)
             median, fired = float(np.median(preds)), float((preds >= 0.5).mean())
             results[gap] = median
             print(f"  {gap:>4.0f}ms  {median:>7.3f}  {fired:>5.0%}  {len(windows):>4}"
