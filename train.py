@@ -63,10 +63,32 @@ TRAINING_COMMANDS = [
 # in total.
 RUNON_SPEEDS = [0.8, 0.9, 1.0, 1.1, 1.2]
 
-# How much of the command's onset to leave after the phrase, in ms. Not zero: the
-# margin is what lets the model hear that the word ended rather than continued,
-# which is the discrimination the confusable negatives are trying to teach.
-RUNON_TAIL_MS = (50.0, 250.0)
+# How much command onset to leave after the phrase, in ms, ON TOP of what the cut
+# already overshoots by. Small on purpose, and the first version of this was not.
+#
+# The value that matters is where the phrase ends relative to the END OF THE ARRAY,
+# because create_fixed_size_clip aligns that with the window. Plain positives sit at
+# ~80 ms (30 ms trim pad + ~50 ms residual). Run-on positives must match, or the
+# positive set becomes bimodal and the model learns the later mode.
+#
+# Two things push the cut past the phrase before this jitter is added at all:
+#   - `phrase_len` is trim_silence's output, which carries a 30 ms trailing pad
+#   - the phrase is shorter inside the run-on than alone, because its final syllable
+#     is coarticulated into the next word: measured at a median of 190 ms across
+#     voices and speeds (range 0-350 ms)
+# The first is corrected below by subtracting the pad. The second cannot be measured
+# per clip, so it is left as the tail's natural variation - which is why this jitter
+# starts at zero rather than adding to it.
+#
+# Getting this wrong is expensive: at (50, 250) the cut kept 270-470 ms of command,
+# the alignment peak moved from 160 ms to 480 ms, median latency went 70 -> 130 ms
+# and extend false accepts went 4/32 -> 7/32. The trailing region stopped being
+# informative, because it held speech in both classes.
+#
+# Note the coarticulated ending is preserved however small the tail is - it is a
+# property of the phrase, not of how much command follows it. A short tail loses
+# nothing that matters.
+RUNON_TAIL_MS = (0.0, 100.0)
 
 # Confusable negatives, per wake word.
 #
@@ -289,8 +311,12 @@ def generate_runon_samples(kokoro_url: str, voices: list, output_dir: Path,
             data = kokoro_tts(kokoro_url, voice, f"{wake_word} {command}", speed)
             if data is not None and phrase_len:
                 data = trim_silence(data)
+                # Drop trim_silence's trailing pad from the reference: it is silence
+                # after the isolated phrase, not part of it. What remains still
+                # overshoots by the coarticulation difference, which is the tail.
+                pad = int(16000 * 30.0 / 1000)
                 tail = int(16000 * np.random.uniform(*RUNON_TAIL_MS) / 1000)
-                cut = phrase_len + tail
+                cut = phrase_len - pad + tail
                 if cut < len(data):
                     data = data[:cut]
                 filename = f"runon_{uuid.uuid4().hex}.wav"
