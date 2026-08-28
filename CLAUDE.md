@@ -57,7 +57,9 @@ python train.py --wake-word "hey cal"
 
 ## Important Design Decisions
 
-- **Negatives must be clearly different** from the wake word. Similar-sounding phrases ("hey call", "hey carl") hurt performance. Use only distinct phrases ("hello", "alexa", "hey siri").
+- **Negatives must include near-misses of the wake word**, not just clearly different phrases. Measured on `hey_seeree.onnx` (see `tuning.md`): trained on nine distinct phrases only, it false-accepted 0/8 on other assistants and 0/36 on general conversation but 13/20 on the phrase continuing into another word ("hey serious" → 0.995) and 5/12 on "hey" plus another name. `train.py` therefore keeps `BASE_NEGATIVES` (wake-word independent) plus `CONFUSABLE_NEGATIVES[safe_name]`; `--negatives-file` supplies the latter for a wake word with no built-in entry.
+- **Training negatives are kept disjoint from the eval corpus** in `generate_negatives.py`. The false-accept gates in `tuning.md` are scored on that corpus, so a phrase in both would turn a generalisation measurement into a memorisation one.
+- `max_negative_weight` (`train.py`, currently 2000) is the lever if a larger negative list makes the model too conservative.
 - All audio is 16kHz, 16-bit, mono WAV.
 - Real voice samples are copied 3x to weight them higher in training.
 - **`my_real_samples/` is searched recursively**, so speakers can live in per-speaker subdirectories (`my_real_samples/jay/`). The relative path is flattened into the destination filename — two speakers recording the same phrase produce identical basenames, so using the basename alone would silently overwrite one speaker's clips with the other's.

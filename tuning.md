@@ -50,30 +50,29 @@ The model rejects perfectly what it was trained to reject and fails on everythin
 adjacent that it never saw. "hey serious" scores **0.995**. This is not a subtle
 generalisation failure; it is a gap in the wordlist.
 
-**Fix:** extend `negative_phrases` with the wake word's own first syllable attached to
-different endings, and "hey" attached to other names. For "hey siri":
+**Fix (done):** the wordlist is now split in `train.py` into `BASE_NEGATIVES` (the
+original nine — wake-word independent) and `CONFUSABLE_NEGATIVES[safe_name]`, 38
+phrases for `hey_seeree` covering the three shapes that failed: the phrase continuing
+into another word ("hey Serena", "hey season"), "hey" plus another name ("hey Sienna",
+"hey Cynthia"), and the same sounds in running speech with no "hey". Bare "hey" is in
+there too — it is what teaches that the second syllable is required. 47 phrases total.
+`--negatives-file` supplies the confusable half for a wake word with no built-in entry,
+and training without any confusables now warns.
 
-```python
-negative_phrases = [
-    # existing
-    "hello", "hi there", "good morning", "excuse me", "okay",
-    "hey google", "alexa", "hey jarvis", "computer",
-    # the phrase, continuing into another word
-    "hey serious", "hey seriously", "hey series", "hey Sirius", "hey syrup",
-    "hey cereal", "hey ceiling", "hey secret", "hey sequel", "hey senior",
-    "hey Sierra", "hey seagull", "hey seeker", "hey silly", "hey city hall",
-    # "hey" plus a name
-    "hey Sarah", "hey Cindy", "hey Sydney", "hey Sammy", "hey Sonny",
-    "hey Sophie", "hey Sally", "hey Sean", "hey Cecily",
-    # the sounds in running speech
-    "I watched the whole series last night",
-    "he takes everything far too seriously",
-    "we need to buy cereal and syrup",
-]
-```
+**The training phrases are deliberately disjoint from the eval corpus below.** An
+earlier draft of this section proposed "hey serious", "hey Sarah" and so on, which are
+verbatim the `extend` and `hey_other` entries in `generate_negatives.py` — training on
+them would have made the gates at the bottom of this file measure memorisation instead
+of generalisation. Anything added to either list should be checked against the other.
+
+One supporting fix: `generate_kokoro_samples` cycled the wordlist as `texts[i % len]`
+from the same starting point for every voice, so with 47 phrases the negative *test*
+set (20 clips per voice) only ever saw the first 20. It now offsets each voice's start,
+giving all 47 phrases 285-286 train and 28-29 test renders. Total negative clip count is
+unchanged, so the class balance is the same.
 
 Cheapest change here by a wide margin, and it is the one that fixes the worst
-behaviour. `max_negative_weight` (`train.py:262`, currently 2000) is the lever if the
+behaviour. `max_negative_weight` (`train.py`, currently 2000) is the lever if the
 model then becomes too conservative.
 
 ---
@@ -155,7 +154,7 @@ shrink rather than vanish.
 
 ## Suggested order
 
-1. Extend `negative_phrases` (Priority 1). Retrain. Re-measure false accepts.
+1. ~~Extend `negative_phrases` (Priority 1).~~ Done — retrain and re-measure false accepts.
 2. Run `check_alignment.py` on the positives and reconcile the 440 ms (Priority 2).
 3. Add command-following positives and matching negatives (Priority 3).
 4. Only then consider shrinking the model's receptive field (fewer than 16 embedding

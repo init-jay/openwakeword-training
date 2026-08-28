@@ -32,6 +32,54 @@ warnings.filterwarnings("ignore", message="Reached EOF prematurely")
 WORK_DIR = Path(__file__).parent.resolve()
 os.chdir(WORK_DIR)
 
+# Negatives that are useful whatever the wake word is: ordinary openers, and the
+# wake words of other assistants.
+BASE_NEGATIVES = [
+    "hello", "hi there", "good morning", "excuse me", "okay",
+    "hey google", "alexa", "hey jarvis", "computer",
+]
+
+# Confusable negatives, per wake word.
+#
+# A model trained only on BASE_NEGATIVES rejects exactly what it was shown and
+# nothing adjacent: hey_seeree.onnx scored 0/8 on other assistants and 0/36 on
+# general conversation, but 13/20 on the phrase continuing into another word
+# ("hey serious" -> 0.995) and 5/12 on "hey" plus a different name. Those two
+# categories are the entire false-accept problem, and neither was in the wordlist.
+#
+# Three shapes matter, and all three want the wake word's own consonants:
+#   - the phrase, continuing into a different word ("hey Serena", "hey season")
+#   - "hey" attached to some other name ("hey Sienna", "hey Cynthia")
+#   - the same sounds inside running speech, with no "hey" at all
+# Bare "hey" belongs here too: it is what teaches that the second syllable is
+# required rather than optional.
+#
+# These are deliberately DISJOINT from the eval corpus in generate_negatives.py.
+# The gates in tuning.md are scored on that corpus, so any phrase appearing in
+# both turns a generalisation measurement into a memorisation one. When adding
+# phrases here, check them against EXTEND/RUNNING/HEY_OTHER over there first.
+CONFUSABLE_NEGATIVES = {
+    "hey_seeree": [
+        # the phrase, continuing into another word
+        "hey Serena", "hey serene", "hey serenade", "hey Syria", "hey syringe",
+        "hey sincere", "hey sincerely", "hey severe", "hey season",
+        "hey seasoning", "hey seizure", "hey ceases", "hey scenery",
+        "hey scenario", "hey CEO", "hey seatbelt", "hey sedan",
+        "hey ceremony", "hey sequin", "hey search for it",
+        # "hey" plus another name, and "hey" on its own
+        "hey Sienna", "hey Selena", "hey Sirena", "hey Cerys", "hey Cynthia",
+        "hey Sabrina", "hey Sylvia", "hey Simon", "hey Sadie", "hey Cecil",
+        "hey", "hey, come here a minute",
+        # the same sounds in running speech, with no "hey"
+        "The scenery on the coast road is worth the detour.",
+        "She was sincere about wanting to see the city again.",
+        "Season the sauce properly before you serve it.",
+        "Serena said she would meet us down by the seafront.",
+        "The ceremony starts at three and runs for about an hour.",
+        "It has been a severe winter by any measure.",
+    ],
+}
+
 
 def get_kokoro_voices(kokoro_url: str) -> list:
     """Get all available English voices from Kokoro."""
@@ -93,9 +141,13 @@ def generate_kokoro_samples(kokoro_url: str, voices: list, output_dir: Path,
     pbar = tqdm(total=total, desc=desc)
     success = 0
 
-    for voice in voices:
+    # Offset each voice's starting point in the wordlist. Without it every voice
+    # renders texts[0:samples_per_voice], so a list longer than samples_per_voice
+    # never gets past its own beginning - which the test sets hit as soon as the
+    # negative list grew past samples_per_voice // 10 phrases.
+    for v, voice in enumerate(voices):
         for i in range(samples_per_voice):
-            text = texts[i % len(texts)]
+            text = texts[(v * samples_per_voice + i) % len(texts)]
             if generate_kokoro_sample(kokoro_url, voice, text, output_dir):
                 success += 1
             pbar.update(1)
@@ -105,6 +157,47 @@ def generate_kokoro_samples(kokoro_url: str, voices: list, output_dir: Path,
     pbar.close()
     print(f"  Generated {success}/{total} samples")
     return success
+
+
+def build_negative_phrases(wake_word: str, negatives_file: str = None) -> list:
+    """Assemble the negative wordlist: base phrases plus confusables.
+
+    Confusables come from --negatives-file if given, otherwise from
+    CONFUSABLE_NEGATIVES for this wake word. Training without any is the single
+    biggest measured cause of false accepts, so it warns rather than proceeding
+    quietly.
+    """
+    safe_name = wake_word.replace(" ", "_").lower()
+    phrases = list(BASE_NEGATIVES)
+
+    if negatives_file:
+        path = Path(negatives_file)
+        if not path.exists():
+            print(f"ERROR: negatives file not found: {path}")
+            sys.exit(1)
+        confusables = [line.strip() for line in path.read_text().splitlines()]
+        confusables = [p for p in confusables if p and not p.startswith("#")]
+        print(f"  Confusable negatives: {len(confusables)} from {path}")
+    elif safe_name in CONFUSABLE_NEGATIVES:
+        confusables = list(CONFUSABLE_NEGATIVES[safe_name])
+        print(f"  Confusable negatives: {len(confusables)} built in for '{safe_name}'")
+    else:
+        confusables = []
+        print(f"  WARNING: no confusable negatives for '{safe_name}'.")
+        print("           The model will reject what it is shown here and fire on")
+        print("           anything adjacent to the wake word. Add an entry to")
+        print("           CONFUSABLE_NEGATIVES or pass --negatives-file.")
+
+    # A confusable that is also a positive text would teach the two classes the
+    # same clip; cheap to check, expensive to debug.
+    positives = {wake_word.lower()}
+    duplicates = [p for p in confusables if p.lower() in positives]
+    if duplicates:
+        print(f"ERROR: these negatives are the wake word itself: {duplicates}")
+        sys.exit(1)
+
+    seen, phrases = set(), phrases + confusables
+    return [p for p in phrases if not (p.lower() in seen or seen.add(p.lower()))]
 
 
 def copy_real_samples(wake_word: str, output_dir: Path, copies: int = 3) -> int:
@@ -314,6 +407,10 @@ def main():
     parser.add_argument("--data-dir", default=".", help="Directory containing training data (features, audioset, fma, mit_rirs)")
     parser.add_argument("--no-trim", action="store_true",
                         help="Skip silence trimming before augmentation (not recommended)")
+    parser.add_argument("--negatives-file",
+                        help="Text file of confusable negative phrases, one per line "
+                             "(# comments allowed). Overrides the built-in list for "
+                             "this wake word; base negatives are always included.")
     args = parser.parse_args()
 
     wake_word = args.wake_word
@@ -351,12 +448,11 @@ def main():
         f"{wake_word}.",
     ]
 
-    # Negative phrases - ONLY clearly different words (not similar-sounding!)
-    # Using similar-sounding phrases hurts model performance
-    negative_phrases = [
-        "hello", "hi there", "good morning", "excuse me", "okay",
-        "hey google", "alexa", "hey jarvis", "computer",
-    ]
+    # Negative phrases - see build_negative_phrases for why the confusable ones
+    # (near-misses of the wake word) are the important half of this list.
+    print("\n[Negative wordlist]")
+    negative_phrases = build_negative_phrases(wake_word, args.negatives_file)
+    print(f"  Total negative phrases: {len(negative_phrases)}")
 
     # === POSITIVE SAMPLES ===
     print("\n" + "=" * 60)
