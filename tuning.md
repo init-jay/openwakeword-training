@@ -9,6 +9,64 @@ they are.
 
 ---
 
+## Run 4: `9151908` — alignment recovered, Priority 3 solved
+
+| | run 2 | run 3 | run 4 | gate |
+|---|---:|---:|---:|---|
+| alignment peak | 160 ms | 480 ms | **160 ms** | ~180 ms |
+| fires from | 80-240 ms | 280-560 ms | 120-320 ms | |
+| median latency | 70 ms | 130 ms | **77 ms** | < 120 ms **PASS** |
+| detection, command after (real) | 50/56 | 54/56 | 53/56 (95%) | >= 90% **PASS** |
+| synthetic `cmd_run` | 30/36 (83%) | - | **36/36 (100%)** | |
+| clean positive detection | 51/56 | 53/56 | 53/56 (95%) | >= 55/56 |
+| `extend` + `hey_other` false accepts | 4/32 | 7/32 | 6/32 (19%) | < 2/32 |
+
+**Two gates now pass.** The alignment recovered completely despite this run still
+carrying the v2 cut's +153 ms bias - the 60% of positives that are phrase-alone
+dominate the mode. The bias shows up instead as a shifted band: firing moved from
+80-240 ms to 120-320 ms, about 40 ms later at both edges, which is the residual to
+expect the timestamp-exact cut to remove.
+
+**Priority 3 is solved.** Run-on utterances rendered as one breath went 83% -> 100%.
+That was the point of the run-on positives, and it worked.
+
+**The cost is the `extend` count**, 4/32 -> 6/32 against run 2. This is the trade
+flagged when the change went in: positives that end in command speech make the
+trailing region less discriminating, and trailing context is what separates the
+phrase from its extensions. Two clips, for +17 points on run-on detection.
+
+**Untouched, as expected:** speed 1.40 (3/6) and 1.60 (2/6). The speed range is still
+U(0.7, 1.3).
+
+**New finding - one voice carries most of the synthetic misses.** `af_nova` fails 13
+of its 31 clips; every other voice fails 2-4. It passes at -06 and -12 dBFS and fails
+from -18 down, so it is marginal rather than broken, and it is in the training set.
+It sits in `VOICES[:6]`, which is why the level, noise and speed sweeps all read 5/6.
+Worth listening to before reading much into any single sweep row.
+
+### What that commit contained
+
+* Run-on positives cut by the **v2 estimate** — `cut = phrase_len - pad + tail`,
+  `RUNON_TAIL_MS = (0, 100)`. Measured afterwards at a median **+153 ms late** and
+  voice-dependent (`af_bella` ~0 ms, `bf_lily` +348..+459 ms), with 2 of 18 sampled
+  clips cutting slightly *inside* the wake word. Better than run 3's 270-470 ms, but
+  not the fix.
+* All three openWakeWord patches, and `onnxruntime-gpu` in the Dockerfile.
+
+Not in it, so **not** in this run: the timestamp-exact run-on cut
+(`/dev/captioned_speech`), parallel TTS generation, and multi-server TTS.
+
+So run 4 tests one thing: whether reducing the run-on overshoot from ~370 ms to
+~150 ms brings the alignment peak back from 480 ms. Expect an improvement but not a
+full recovery to run 2's 160 ms, and read a residual as the remaining +153 ms rather
+than as the approach failing.
+
+**Whether it got GPU feature computation depends on when the image was built, not on
+the commit.** The tell is in its own log: `Computing features` at ~2.46 it/s is the
+single-threaded CPU path; substantially faster means the GPU is in use.
+
+---
+
 ## Run 3: run-on positives, more data — and an alignment regression
 
 `hey_seeree_ee215d8e...onnx`, the first run with run-on positives, `samples_per_voice`
