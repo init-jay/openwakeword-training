@@ -6,9 +6,27 @@ Train custom wake word models for [OpenWakeWord](https://github.com/dscripka/ope
 
 ## What You Get
 
-- A trained `.onnx` wake word model (~400KB)
-- Works with OpenWakeWord, Home Assistant, or any system that supports ONNX models
-- Typical results: 70%+ accuracy, <2 false positives per hour
+- A trained `.onnx` wake word model (~400KB), convertible to `.tflite` (see `onnx2tflite.py`)
+- Works with OpenWakeWord, Home Assistant, wyoming-openwakeword, or anything that loads ONNX or tflite
+
+### Typical results
+
+Measured for "hey seeree" against 56 held-out real recordings and a 100-clip synthetic negative corpus, at threshold 0.5 (`eval_model.py`):
+
+| | result |
+|---|---|
+| detection, phrase spoken alone | 53/56 (95%) |
+| detection, command spoken immediately after | 53/56 (95%) |
+| median latency from end of speech | 77 ms |
+| false accepts, general conversation | 0/36 |
+| false accepts, bare commands (no wake word) | 0/12 |
+| false accepts, other assistants ("hey Google", "Alexa") | 0/8 |
+| false accepts, "hey" + a different name | 0/12 |
+| **false accepts, phrase continuing into another word** | **6/20** |
+
+The last row is the honest caveat: this model is quiet on ordinary speech but still fires on close phonetic neighbours ("hey serious", "hey series"). Those clips are adversarial by construction — a fifth of the negative corpus — so read the categories separately rather than pooling them into one false-accept rate.
+
+Results depend heavily on the wake word and on how many real recordings you provide (91 clips from 2 speakers here). `tuning.md` documents the measurements behind these numbers and what moved them.
 
 ## Requirements
 
