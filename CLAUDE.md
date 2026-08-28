@@ -13,6 +13,10 @@ Local training pipeline for custom OpenWakeWord wake word models. Uses Kokoro TT
 docker compose build trainer                  # Build training image
 docker compose run --rm trainer ./setup-data.sh  # Download ~17GB training data
 docker compose run --rm trainer python train.py --wake-word "hey cal" --data-dir /app/data
+
+# Where does the trained model want the phrase in the window? (needs openwakeword)
+docker compose run --rm -v $(pwd)/check_model_alignment.py:/app/check_model_alignment.py \
+    trainer python check_model_alignment.py --model /app/my_custom_model/hey_cal.onnx
 ```
 
 ### Host (mic access needed)
@@ -43,7 +47,8 @@ python train.py --wake-word "hey cal"
 **Host** handles mic-dependent tasks:
 - `record_samples.py` - records real voice samples (PyAudio)
 - `test_model.py` - live mic testing of trained models (streams raw PCM from ffmpeg's avfoundation input; no PyAudio)
-- `check_alignment.py` - reports where speech sits in the detection window
+- `check_alignment.py` - reports where speech sits in the detection window (numpy + scipy only, so it runs anywhere)
+- `check_model_alignment.py` - the same question asked of a *trained* model: sweeps where the phrase is placed and reports the alignment the model learned, which is also its latency floor. Needs onnxruntime and an importable `openwakeword`, so run it in the trainer container (or with `PYTHONPATH` pointing at an openWakeWord checkout).
 
 ### Docker volume mounts
 - `./data` → `/app/data` - 17GB feature files, background audio, impulse responses

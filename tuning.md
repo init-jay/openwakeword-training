@@ -105,19 +105,63 @@ on, `trim_silence` leaves `pad_ms=30` and `create_fixed_size_clip` adds
 30-230 ms from the window end, median ~130 ms. The model behaves as if trained at
 ~440 ms. Something is inconsistent.
 
-**Diagnose before changing anything:**
+### Diagnosed: the measured model predates trimming
 
-```bash
-python check_alignment.py my_custom_model/hey_seeree/positive_train --verbose
+Four measurements, and they close the gap completely.
+
+**1. The 440 ms is real, not a measurement artifact.** Re-measured in the *training*
+framing rather than by streaming — one fixed 32000-sample window, features via
+`AudioFeatures.embed_clips`, which is the exact call `compute_features_from_generator`
+makes — sweeping where the phrase is placed, over the 91 real recordings:
+
+```
+   gap (phrase end -> window end)    0    120   160   200   400   640   720
+   median score                   0.001 0.044 0.860 0.978 0.991 0.782 0.018
 ```
 
-If it reports ~440 ms, the trimming is not doing what it should for this corpus — check
-whether the model predates trimming, whether `--no-trim` was used, or whether Kokoro's
-output has a tail that `top_db=40` does not catch. If it reports ~130 ms, then the
-model's preference was learned from something else and the theory needs revisiting.
+Peak at 400 ms, usable band roughly 160-640 ms, collapse below ~120 ms. The streaming
+measurement said 440 ms; the offline one says 400. So the streaming feature path adds
+no meaningful lag — this is a property of the model, learned from its training data.
 
-**Target:** phrase ending 100-150 ms before the window end. Worth ~100-150 ms of
-latency. Do not drive it to zero — see the note under Priority 3.
+**2. `trim_silence` works.** On Kokoro output at the same server and speed range, the
+audio left after the phrase ends (measured at the -34 dB marker the latency method
+uses, against the -40 dB threshold the trim uses) is a median of **50 ms**, p90 79 ms.
+No hidden sub-threshold tail. The real recordings leave 0 ms.
+
+**3. Untrimmed Kokoro explains 400 ms exactly.** Short Kokoro phrases as the server
+emits them carry a mean of **304 ms** of trailing silence, median gap 317 ms. Add the
+U(0, 200) ms jitter and the phrase lands a median of **~417 ms** from the window end.
+That is the observed peak. Trimmed, the same clips predict 30 ms pad + 50 ms residual
++ jitter ≈ **180 ms**.
+
+**4. The timeline agrees.** `trim_silence` landed in `c1f2e56` at 14:50 on 2026-08-27;
+`hey_seeree.onnx` was written at 15:56 the same day — 66 minutes later, far less than a
+run that makes 13,400 TTS calls and then trains for 50,000 steps. The run that produced
+the measured model started before trimming existed.
+
+**Conclusion: no code change needed.** The fix is already in `train.py` and takes effect
+on the next retrain. Expect the peak to move from ~400 ms to ~180 ms and the latency to
+drop by roughly the same amount, which clears the 120 ms gate on its own.
+
+**Verify after the retrain:**
+
+```bash
+python check_model_alignment.py --model my_custom_model/hey_seeree.onnx
+```
+
+The peak should have moved from ~480 ms to ~180 ms, and the score at 120 ms should no
+longer be near zero. `check_alignment.py my_custom_model/hey_seeree/positive_train` is
+the cheaper check on the input side — run it after the "Trimming silence" step prints,
+and it should report a mean gap under the 200 ms jitter.
+
+**Target:** phrase ending 100-150 ms before the window end. Do not drive it to zero —
+see the note under Priority 3.
+
+**Watch for:** clips longer than the 2 s window are truncated to their *first* 2 s
+(`data.py:676-677`) and the tail is discarded, so a long negative sentence only
+contributes its opening. 4 of 32 sampled Kokoro sentences hit this. It is harmless when
+the confusable sound is early in the sentence, which is why the running-speech negatives
+added in Priority 1 put theirs in the first few words.
 
 ---
 
@@ -155,7 +199,9 @@ shrink rather than vanish.
 ## Suggested order
 
 1. ~~Extend `negative_phrases` (Priority 1).~~ Done — retrain and re-measure false accepts.
-2. Run `check_alignment.py` on the positives and reconcile the 440 ms (Priority 2).
+2. ~~Run `check_alignment.py` on the positives and reconcile the 440 ms (Priority 2).~~
+   Diagnosed — the measured model predates trimming, and the retrain fixes it with no
+   code change. Confirm the peak moved once the new model exists.
 3. Add command-following positives and matching negatives (Priority 3).
 4. Only then consider shrinking the model's receptive field (fewer than 16 embedding
    frames), which is the secondary latency lever and changes `input_shape`.
