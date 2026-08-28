@@ -34,11 +34,22 @@ the phrase, and none of them were in the training wordlist, which is disjoint fr
 corpus by construction. 13/20 -> 4/20 on `extend` is a real generalisation gain, not
 memorisation. `hey_other` is now 0/12.
 
-**The "trained on quiet" signature is gone.** The 300 ms pause used to recover six
-detections (46 -> 52); it now recovers none (50 -> 50). Priority 3's diagnosis was that
-the model had learned the phrase is followed by silence, and fixing the alignment
-removed that on its own. What remains is a flat 89%, not a gap between two interaction
-styles.
+**The "trained on quiet" signature survives — the spliced test just cannot see it.**
+By that test the 300 ms pause, which used to recover six detections (46 -> 52), now
+recovers none (50 -> 50), and this section previously concluded the problem was solved.
+It is not. Rendering the phrase and the command as *one* TTS utterance
+(`generate_positives.py --sweeps command`) puts the gap straight back:
+
+| | detected |
+|---|---:|
+| `cmd_pause` — "hey seeree**,** what's the time?" | 35/36 (97%) |
+| `cmd_run` — "hey seeree what's the time?" | **30/36 (83%)** |
+
+The splice is the insensitive instrument. It keeps the phrase's *isolated* ending —
+the final syllable released and decaying as it would in isolation — and abuts unrelated
+audio after it. In real speech the "-ee" of "seeree" is coarticulated into "what's" and
+shortened, so the phrase itself is acoustically different, not just its surroundings.
+Priority 3 remains open, and should be measured with the single-utterance corpus.
 
 **The cost:** clean positives went 53 -> 51, and the cause is not yet known.
 `max_negative_weight` (`train.py`, 2000) is the lever if the model needs loosening.
@@ -58,9 +69,48 @@ Worth knowing but not the cause: the corpus is quiet overall — median peak 247
 32767 (~ -22 dBFS) with a -26 dB noise floor, which is what makes it sound crackly.
 That applies to every clip equally, detected or not.
 
-Remaining work, in order: the four `extend` false accepts are what Priority 3's trailing
-context is supposed to discriminate, and the five missed positives need a cause before
-anything is done about them.
+### What actually degrades detection
+
+Measured with `generate_positives.py` (126 synthetic clips) scored with
+`eval_model.py --by-group`. These are training-distribution clips, so the sweeps that
+push outside what training saw are the informative part; the flat parts are a floor.
+
+| speed | 0.55 | 0.65 | 0.75 | 1.00 | 1.25 | 1.40 | 1.60 |
+|---|---|---|---|---|---|---|---|
+| detected | 6/6 | 6/6 | 6/6 | 6/6 | 6/6 | **3/6** | **2/6** |
+| median score | 0.969 | 0.987 | 0.988 | 0.984 | 0.982 | **0.481** | **0.023** |
+
+`train.py` renders positives at U(0.7, 1.3). The model holds up *below* that range —
+0.55 still detects 6/6 — but falls off a cliff just above it. Fast delivery is the
+untrained failure mode, and the asymmetry says the fix is widening the top of the range,
+not the bottom.
+
+**Recording level does not matter.** 6/6 detected at every level from -6 to -34 dBFS,
+median score flat at 0.983-0.985. **SNR does**: 6/6 down to 15 dB, 5/6 at 10 dB, 4/6 at
+5 dB. The real recordings sit at ~22-26 dB SNR, so they are clear of the degradation
+point, and their -22 dBFS level costs nothing. Recording hotter is about margin, not
+about a level the model needs. (Note the latency column is meaningless for the noise
+sweep — added noise moves the 2%-of-peak speech-end marker.)
+
+**This partly explains the five missed real positives.** Four of the five are fast:
+`hey_seeree_0011.wav` at 300 ms is shorter than all 51 detected clips (shortest
+detected: 430 ms), and three more sit at the 84th-94th percentile for speed. The fifth,
+`hey_seeree_0016.wav` at 1440 ms, is slow, so speed is a strong risk factor rather than
+a complete account — and n=5 is not much to conclude from.
+
+Remaining work, in order:
+
+1. Widen the positive speed range in `train.py` (`generate_kokoro_sample`, currently
+   `np.random.uniform(0.7, 1.3)`) to about `(0.7, 1.6)`. Cheapest remaining change,
+   and it targets a measured failure.
+2. Priority 3 proper: positives where the phrase runs into a command as one utterance
+   (83% vs 97% with a pause). Generating those as training data is the same TTS call
+   `generate_positives.py --sweeps command` already makes.
+3. The four `extend` false accepts, which is what Priority 3's trailing context is
+   supposed to discriminate.
+
+Both 1 and 2 push the positives to sound *more* like their neighbours, so watch the
+`extend` count when either lands - it can trade against them.
 
 ---
 

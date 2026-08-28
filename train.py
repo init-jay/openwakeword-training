@@ -39,6 +39,35 @@ BASE_NEGATIVES = [
     "hey google", "alexa", "hey jarvis", "computer",
 ]
 
+# Commands used two ways: appended to the wake word to build run-on positives
+# ("hey seeree what's the time"), and rendered on their own as negatives.
+#
+# Both halves are needed. The positives teach that the phrase can be followed
+# immediately by speech; without the matching negatives the model can learn the
+# shortcut "speech after ~ wake word" instead, since in training every clip with
+# trailing speech would be positive.
+#
+# Deliberately disjoint from generate_negatives.py's COMMAND list, which
+# generate_positives.py also uses for its cmd_run/cmd_pause sweeps - those are the
+# eval corpus, and training on them would turn that measurement into memorisation.
+TRAINING_COMMANDS = [
+    "open the garage door", "how cold is it outside", "start the kettle",
+    "find my phone", "skip this song", "dim the bedroom lights",
+    "how long is left on the timer", "put the heating on", "read my messages",
+    "lock the back door", "what is on tonight", "call the office",
+]
+
+# Run-on positives are rendered at a few fixed speeds rather than a continuous
+# draw, so the phrase-alone reference rendering can be cached per (voice, speed).
+# Continuous speeds would need one reference call per clip instead of a few hundred
+# in total.
+RUNON_SPEEDS = [0.8, 0.9, 1.0, 1.1, 1.2]
+
+# How much of the command's onset to leave after the phrase, in ms. Not zero: the
+# margin is what lets the model hear that the word ended rather than continued,
+# which is the discrimination the confusable negatives are trying to teach.
+RUNON_TAIL_MS = (50.0, 250.0)
+
 # Confusable negatives, per wake word.
 #
 # A model trained only on BASE_NEGATIVES rejects exactly what it was shown and
@@ -98,10 +127,9 @@ def get_kokoro_voices(kokoro_url: str) -> list:
         sys.exit(1)
 
 
-def generate_kokoro_sample(kokoro_url: str, voice: str, text: str, output_dir: Path) -> bool:
-    """Generate a single Kokoro TTS sample with speed variation."""
+def kokoro_tts(kokoro_url: str, voice: str, text: str, speed: float):
+    """Render one utterance as 16 kHz int16 audio, or None on failure."""
     try:
-        speed = np.random.uniform(0.7, 1.3)
         r = requests.post(
             f"{kokoro_url}/v1/audio/speech",
             json={
@@ -114,23 +142,31 @@ def generate_kokoro_sample(kokoro_url: str, voice: str, text: str, output_dir: P
             timeout=30
         )
         if r.status_code != 200:
-            return False
+            return None
 
-        audio_data = io.BytesIO(r.content)
-        sr, data = scipy.io.wavfile.read(audio_data)
+        sr, data = scipy.io.wavfile.read(io.BytesIO(r.content))
+        if data.ndim > 1:
+            data = data[:, 0]
 
         # Resample to 16kHz if needed
         if sr != 16000:
             from scipy.signal import resample
             num_samples = int(len(data) * 16000 / sr)
             data = resample(data, num_samples)
-            data = np.clip(data, -32768, 32767).astype(np.int16)
 
-        filename = f"kokoro_{uuid.uuid4().hex}.wav"
-        scipy.io.wavfile.write(str(output_dir / filename), 16000, data)
-        return True
+        return np.clip(data, -32768, 32767).astype(np.int16)
     except Exception:
+        return None
+
+
+def generate_kokoro_sample(kokoro_url: str, voice: str, text: str, output_dir: Path) -> bool:
+    """Generate a single Kokoro TTS sample with speed variation."""
+    data = kokoro_tts(kokoro_url, voice, text, np.random.uniform(0.7, 1.3))
+    if data is None:
         return False
+    filename = f"kokoro_{uuid.uuid4().hex}.wav"
+    scipy.io.wavfile.write(str(output_dir / filename), 16000, data)
+    return True
 
 
 def generate_kokoro_samples(kokoro_url: str, voices: list, output_dir: Path,
@@ -159,7 +195,8 @@ def generate_kokoro_samples(kokoro_url: str, voices: list, output_dir: Path,
     return success
 
 
-def build_negative_phrases(wake_word: str, negatives_file: str = None) -> list:
+def build_negative_phrases(wake_word: str, negatives_file: str = None,
+                           with_commands: bool = True) -> list:
     """Assemble the negative wordlist: base phrases plus confusables.
 
     Confusables come from --negatives-file if given, otherwise from
@@ -169,6 +206,13 @@ def build_negative_phrases(wake_word: str, negatives_file: str = None) -> list:
     """
     safe_name = wake_word.replace(" ", "_").lower()
     phrases = list(BASE_NEGATIVES)
+
+    # The commands that appear after the wake word in the run-on positives, here on
+    # their own. Without them every clip containing trailing command speech would be
+    # a positive, and "speech after" is a far easier feature to learn than the wake
+    # word itself.
+    if with_commands:
+        phrases += TRAINING_COMMANDS
 
     if negatives_file:
         path = Path(negatives_file)
@@ -198,6 +242,68 @@ def build_negative_phrases(wake_word: str, negatives_file: str = None) -> list:
 
     seen, phrases = set(), phrases + confusables
     return [p for p in phrases if not (p.lower() in seen or seen.add(p.lower()))]
+
+
+def generate_runon_samples(kokoro_url: str, voices: list, output_dir: Path,
+                           per_voice: int, wake_word: str, desc: str,
+                           reference: dict = None):
+    """Positives where the phrase runs straight into a command.
+
+    The model measured in tuning.md detects 97% of "hey seeree, what's the time?"
+    (comma, so the TTS puts a pause in) but only 83% of "hey seeree what's the time?"
+    spoken as one breath. Splicing a command onto a separately-recorded phrase does
+    not reproduce that, because the phrase keeps its isolated ending; the final
+    syllable has to actually be coarticulated into the next word, which means
+    rendering the whole thing as one utterance.
+
+    The clip is then CUT shortly after the phrase, and that is the part to be careful
+    about. create_fixed_size_clip aligns the END OF THE ARRAY with the end of the
+    detection window, so a whole "hey seeree what's the time" would land the wake word
+    ~1.5s before the window end - outside the window once it is truncated to 2s, and
+    the opposite of the alignment the rest of the pipeline works to produce. Cutting
+    just past the phrase leaves the command's onset as trailing context, which is the
+    thing being taught, and keeps the phrase where the window expects it.
+
+    The cut point comes from a phrase-alone rendering at the same voice and speed,
+    cached per (voice, speed). Coarticulation makes the phrase slightly shorter inside
+    the run-on than it is alone, so the cut lands a little way into the command -
+    which is the intent, and the jitter on top of it is deliberate.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    total = per_voice * len(voices)
+    pbar = tqdm(total=total, desc=desc)
+    reference = {} if reference is None else reference
+    success = 0
+
+    for voice in voices:
+        for i in range(per_voice):
+            speed = RUNON_SPEEDS[i % len(RUNON_SPEEDS)]
+            command = TRAINING_COMMANDS[(i // len(RUNON_SPEEDS)) % len(TRAINING_COMMANDS)]
+
+            key = (voice, speed)
+            if key not in reference:
+                alone = kokoro_tts(kokoro_url, voice, wake_word, speed)
+                reference[key] = len(trim_silence(alone)) if alone is not None else None
+            phrase_len = reference[key]
+
+            data = kokoro_tts(kokoro_url, voice, f"{wake_word} {command}", speed)
+            if data is not None and phrase_len:
+                data = trim_silence(data)
+                tail = int(16000 * np.random.uniform(*RUNON_TAIL_MS) / 1000)
+                cut = phrase_len + tail
+                if cut < len(data):
+                    data = data[:cut]
+                filename = f"runon_{uuid.uuid4().hex}.wav"
+                scipy.io.wavfile.write(str(output_dir / filename), 16000, data)
+                success += 1
+            pbar.update(1)
+            if i % 20 == 0:
+                time.sleep(0.05)
+
+    pbar.close()
+    print(f"  Generated {success}/{total} run-on samples "
+          f"({len(reference)} reference renderings)")
+    return success
 
 
 def copy_real_samples(wake_word: str, output_dir: Path, copies: int = 3) -> int:
@@ -333,7 +439,7 @@ def setup_training_dirs(wake_word: str) -> Path:
 
 
 def create_config(wake_word: str, n_samples: int, training_steps: int,
-                  layer_size: int, data_dir: str):
+                  layer_size: int, data_dir: str, augmentation_rounds: int = 3):
     """Create training configuration."""
     safe_name = wake_word.replace(" ", "_").lower()
 
@@ -353,6 +459,17 @@ def create_config(wake_word: str, n_samples: int, training_steps: int,
     config["target_false_positives_per_hour"] = 0.1
     config["output_dir"] = "./my_custom_model"
     config["max_negative_weight"] = 2000
+
+    # Each round re-augments every clip with a different impulse response,
+    # background and gain, so this multiplies the distinct feature vectors without
+    # any extra TTS. It matters because training draws 50 positives per step for
+    # 50,000 steps - 2.5M draws against ~14k clips, so every clip is revisited
+    # ~180 times, and at one round those are 180 views of an identical vector.
+    #
+    # Needs patches/honour-augmentation-rounds.py: upstream multiplies the clip
+    # list by this value but sizes the output array from the unmultiplied
+    # directory, so without the patch the extra rounds are computed and discarded.
+    config["augmentation_rounds"] = augmentation_rounds
     config["rir_paths"] = [f'{data_dir}/mit_rirs']
     config["background_paths"] = [f'{data_dir}/audioset_16k', f'{data_dir}/fma']
     config["false_positive_validation_data_path"] = f"{data_dir}/validation_set_features.npy"
@@ -399,7 +516,8 @@ def run_training():
 def main():
     parser = argparse.ArgumentParser(description="Train a custom OpenWakeWord model")
     parser.add_argument("--wake-word", default="hey cal", help="Wake word/phrase to train")
-    parser.add_argument("--samples-per-voice", type=int, default=200, help="Samples per Kokoro voice")
+    parser.add_argument("--samples-per-voice", type=int, default=300,
+                        help="Samples per Kokoro voice (default: %(default)s). Raised from\n                             200 when the wordlists grew: 59 negative phrases and 60\n                             run-on command/speed combinations need more renderings each\n                             to keep per-item density up.")
     parser.add_argument("--training-steps", type=int, default=50000, help="Number of training steps")
     parser.add_argument("--layer-size", type=int, default=64, choices=[32, 64, 128], help="Network layer size")
     parser.add_argument("--kokoro-url", default=os.environ.get("KOKORO_URL", "http://localhost:8880"),
@@ -411,6 +529,14 @@ def main():
                         help="Text file of confusable negative phrases, one per line "
                              "(# comments allowed). Overrides the built-in list for "
                              "this wake word; base negatives are always included.")
+    parser.add_argument("--augmentation-rounds", type=int, default=3,
+                        help="How many differently-augmented copies of each clip to "
+                             "compute features for (default: %(default)s). Multiplies "
+                             "training data at no TTS cost.")
+    parser.add_argument("--runon-fraction", type=float, default=0.4,
+                        help="Fraction of positives where the phrase runs straight "
+                             "into a command instead of being followed by quiet "
+                             "(default: %(default)s). 0 disables them.")
     args = parser.parse_args()
 
     wake_word = args.wake_word
@@ -451,7 +577,8 @@ def main():
     # Negative phrases - see build_negative_phrases for why the confusable ones
     # (near-misses of the wake word) are the important half of this list.
     print("\n[Negative wordlist]")
-    negative_phrases = build_negative_phrases(wake_word, args.negatives_file)
+    negative_phrases = build_negative_phrases(wake_word, args.negatives_file,
+                                             with_commands=args.runon_fraction > 0)
     print(f"  Total negative phrases: {len(negative_phrases)}")
 
     # === POSITIVE SAMPLES ===
@@ -459,11 +586,29 @@ def main():
     print("Generating POSITIVE samples...")
     print("=" * 60)
 
+    # Split the positive budget between the phrase alone and the phrase running into
+    # a command. The total is unchanged, so the balance against the negatives is too.
+    runon_train = int(args.samples_per_voice * args.runon_fraction)
+    plain_train = args.samples_per_voice - runon_train
+    runon_test = int(args.samples_per_voice // 10 * args.runon_fraction)
+    plain_test = args.samples_per_voice // 10 - runon_test
+
     print("\n[Kokoro TTS]")
+    print(f"  Per voice: {plain_train} phrase-alone, {runon_train} run-on "
+          f"({args.runon_fraction:.0%})")
     generate_kokoro_samples(args.kokoro_url, kokoro_voices, pos_train,
-                           args.samples_per_voice, positive_texts, "Kokoro positive train")
+                           plain_train, positive_texts, "Kokoro positive train")
     generate_kokoro_samples(args.kokoro_url, kokoro_voices, pos_test,
-                           args.samples_per_voice // 10, positive_texts, "Kokoro positive test")
+                           plain_test, positive_texts, "Kokoro positive test")
+
+    if runon_train:
+        # One reference cache across both sets: the phrase-alone lengths are the
+        # same, and rebuilding it would cost a few hundred needless TTS calls.
+        reference = {}
+        generate_runon_samples(args.kokoro_url, kokoro_voices, pos_train,
+                               runon_train, wake_word, "Kokoro run-on train", reference)
+        generate_runon_samples(args.kokoro_url, kokoro_voices, pos_test,
+                               runon_test, wake_word, "Kokoro run-on test", reference)
 
     print("\n[Real Voice]")
     real_count = copy_real_samples(wake_word, pos_train)
@@ -508,7 +653,8 @@ def main():
             print(f"  {label}: trimmed {n_trimmed} clips (mean {mean_ms:.0f}ms removed)")
 
     # Create config and run training
-    create_config(wake_word, n_pos_train, args.training_steps, args.layer_size, args.data_dir)
+    create_config(wake_word, n_pos_train, args.training_steps, args.layer_size,
+                  args.data_dir, args.augmentation_rounds)
     run_augmentation()
     run_training()
 
