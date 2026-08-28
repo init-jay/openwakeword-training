@@ -11,6 +11,7 @@ Docker:
 """
 
 import argparse
+import base64
 import io
 import os
 import shutil
@@ -57,37 +58,36 @@ TRAINING_COMMANDS = [
     "lock the back door", "what is on tonight", "call the office",
 ]
 
-# Run-on positives are rendered at a few fixed speeds rather than a continuous
-# draw, so the phrase-alone reference rendering can be cached per (voice, speed).
-# Continuous speeds would need one reference call per clip instead of a few hundred
-# in total.
+# Speeds for run-on positives. Discrete rather than a continuous draw so the
+# fallback path can cache its phrase-alone reference per (voice, speed); the
+# primary path gets the boundary from the server and would not need this.
 RUNON_SPEEDS = [0.8, 0.9, 1.0, 1.1, 1.2]
 
-# How much command onset to leave after the phrase, in ms, ON TOP of what the cut
-# already overshoots by. Small on purpose, and the first version of this was not.
+# How much of the command's onset to keep after the wake word ends, in ms.
 #
 # The value that matters is where the phrase ends relative to the END OF THE ARRAY,
 # because create_fixed_size_clip aligns that with the window. Plain positives sit at
 # ~80 ms (30 ms trim pad + ~50 ms residual). Run-on positives must match, or the
-# positive set becomes bimodal and the model learns the later mode.
+# positive set is bimodal and the model learns the later mode.
 #
-# Two things push the cut past the phrase before this jitter is added at all:
-#   - `phrase_len` is trim_silence's output, which carries a 30 ms trailing pad
-#   - the phrase is shorter inside the run-on than alone, because its final syllable
-#     is coarticulated into the next word: measured at a median of 190 ms across
-#     voices and speeds (range 0-350 ms)
-# The first is corrected below by subtracting the pad. The second cannot be measured
-# per clip, so it is left as the tail's natural variation - which is why this jitter
-# starts at zero rather than adding to it.
+# The boundary itself now comes from Kokoro's /dev/captioned_speech word timestamps,
+# so this is the whole overshoot rather than a jitter added to an estimate. Two
+# earlier attempts inferred the boundary from a phrase-alone rendering instead:
 #
-# Getting this wrong is expensive: at (50, 250) the cut kept 270-470 ms of command,
-# the alignment peak moved from 160 ms to 480 ms, median latency went 70 -> 130 ms
-# and extend false accepts went 4/32 -> 7/32. The trailing region stopped being
-# informative, because it held speech in both classes.
+#   v1, cut at phrase_len + U(50,250): kept 270-470 ms of command. The alignment
+#      peak moved 160 -> 480 ms, median latency 70 -> 130 ms, and extend false
+#      accepts 4/32 -> 7/32, because a trailing region holding speech in BOTH
+#      classes stops discriminating and the model learns to ignore it.
+#   v2, correcting for the 30 ms trim pad: still a median +153 ms late, and
+#      voice-dependent (af_bella ~0 ms, bf_lily +348..+459 ms). Worse, 2 of 18
+#      sampled clips cut slightly INSIDE the wake word, removing the coarticulated
+#      ending that is the entire reason for generating these clips.
+#
+# The timestamps remove both the bias and the variance. The fallback path still uses
+# the v2 estimate, which is why it reports itself loudly.
 #
 # Note the coarticulated ending is preserved however small the tail is - it is a
-# property of the phrase, not of how much command follows it. A short tail loses
-# nothing that matters.
+# property of the phrase, not of how much command follows it.
 RUNON_TAIL_MS = (0.0, 100.0)
 
 # Confusable negatives, per wake word.
@@ -220,6 +220,67 @@ def kokoro_tts(kokoro_url: str, voice: str, text: str, speed: float):
         return None
 
 
+def kokoro_tts_timed(kokoro_url: str, voice: str, text: str, speed: float):
+    """Render an utterance and return (16 kHz int16 audio, word timestamps).
+
+    Kokoro-FastAPI's /dev/captioned_speech returns per-word start/end times
+    alongside the audio, which is what makes an exact cut possible for the run-on
+    positives: it says precisely where the wake word ends inside the utterance,
+    instead of that having to be inferred from a separate phrase-alone rendering.
+
+    Returns (None, None) if the endpoint is unavailable, so callers can fall back.
+    """
+    try:
+        r = requests.post(
+            f"{kokoro_url}/dev/captioned_speech",
+            json={
+                "model": "kokoro",
+                "voice": voice,
+                "input": text,
+                "response_format": "wav",
+                "speed": speed,
+                "stream": False,
+                "return_timestamps": True,
+            },
+            timeout=60
+        )
+        if r.status_code != 200:
+            return None, None
+
+        payload = r.json()
+        sr, data = scipy.io.wavfile.read(io.BytesIO(base64.b64decode(payload["audio"])))
+        if data.ndim > 1:
+            data = data[:, 0]
+        if sr != 16000:
+            from scipy.signal import resample
+            data = resample(data, int(len(data) * 16000 / sr))
+        return np.clip(data, -32768, 32767).astype(np.int16), payload.get("timestamps")
+    except Exception:
+        return None, None
+
+
+def phrase_end_sample(timestamps, wake_word: str, sr: int = 16000):
+    """Sample index where the wake word ends, or None if the words do not line up.
+
+    Verified rather than assumed: the timestamps are matched against the words of
+    the wake phrase before their times are used. A mismatch (different tokenisation,
+    a normalisation rule splitting a word) would otherwise cut at the wrong place
+    silently, and a wrong cut here is what broke the alignment last time.
+    """
+    if not timestamps:
+        return None
+
+    strip = str.maketrans("", "", ".,!?;:\"'")
+    expected = [w.translate(strip).lower() for w in wake_word.split()]
+    got = [str(t.get("word", "")).translate(strip).lower()
+           for t in timestamps[:len(expected)]]
+    if got != expected:
+        return None
+
+    end = timestamps[len(expected) - 1].get("end_time")
+    return int(end * sr) if end else None
+
+
 def generate_kokoro_sample(kokoro_url: str, voice: str, text: str, output_dir: Path) -> bool:
     """Generate a single Kokoro TTS sample with speed variation."""
     data = kokoro_tts(kokoro_url, voice, text, np.random.uniform(0.7, 1.3))
@@ -334,30 +395,38 @@ def generate_runon_samples(kokoro_url: str, voices: list, output_dir: Path,
     total = per_voice * len(voices)
     pbar = tqdm(total=total, desc=desc)
     reference = {} if reference is None else reference
-    success = 0
+    success = fallbacks = 0
 
     for voice in voices:
         for i in range(per_voice):
             speed = RUNON_SPEEDS[i % len(RUNON_SPEEDS)]
             command = TRAINING_COMMANDS[(i // len(RUNON_SPEEDS)) % len(TRAINING_COMMANDS)]
 
-            key = (voice, speed)
-            if key not in reference:
-                alone = kokoro_tts(kokoro_url, voice, wake_word, speed)
-                reference[key] = len(trim_silence(alone)) if alone is not None else None
-            phrase_len = reference[key]
+            text = f"{wake_word} {command}"
+            tail = int(16000 * np.random.uniform(*RUNON_TAIL_MS) / 1000)
 
-            data = kokoro_tts(kokoro_url, voice, f"{wake_word} {command}", speed)
-            if data is not None and phrase_len:
-                data = trim_silence(data)
-                # Drop trim_silence's trailing pad from the reference: it is silence
-                # after the isolated phrase, not part of it. What remains still
-                # overshoots by the coarticulation difference, which is the tail.
-                pad = int(16000 * 30.0 / 1000)
-                tail = int(16000 * np.random.uniform(*RUNON_TAIL_MS) / 1000)
-                cut = phrase_len - pad + tail
-                if cut < len(data):
-                    data = data[:cut]
+            # Preferred path: the server tells us where the wake word ends.
+            data, timestamps = kokoro_tts_timed(kokoro_url, voice, text, speed)
+            cut = phrase_end_sample(timestamps, wake_word) if data is not None else None
+
+            if cut is None:
+                # Fallback for a server without /dev/captioned_speech: infer the
+                # boundary from a phrase-alone rendering, cached per (voice, speed).
+                # Less accurate - it cannot see the coarticulation - so it errs on
+                # the late side rather than risk cutting into the wake word.
+                if data is None:
+                    data = kokoro_tts(kokoro_url, voice, text, speed)
+                key = (voice, speed)
+                if key not in reference:
+                    alone = kokoro_tts(kokoro_url, voice, wake_word, speed)
+                    reference[key] = len(trim_silence(alone)) if alone is not None else None
+                if data is not None and reference[key]:
+                    data = trim_silence(data)
+                    cut = reference[key] - int(16000 * 30.0 / 1000)   # drop the trim pad
+                    fallbacks += 1
+
+            if data is not None and cut:
+                data = data[:cut + tail] if cut + tail < len(data) else data
                 filename = f"runon_{uuid.uuid4().hex}.wav"
                 scipy.io.wavfile.write(str(output_dir / filename), 16000, data)
                 success += 1
@@ -366,8 +435,12 @@ def generate_runon_samples(kokoro_url: str, voices: list, output_dir: Path,
                 time.sleep(0.05)
 
     pbar.close()
-    print(f"  Generated {success}/{total} run-on samples "
-          f"({len(reference)} reference renderings)")
+    print(f"  Generated {success}/{total} run-on samples")
+    if fallbacks:
+        print(f"  NOTE: {fallbacks} clip(s) fell back to the phrase-alone estimate "
+              f"({len(reference)} reference renderings).")
+        print("        /dev/captioned_speech was unavailable or its words did not match")
+        print("        the wake phrase, so those cuts sit later than they should.")
     return success
 
 
