@@ -7,8 +7,19 @@ Lives in its own directory with its own uv environment: it runs on the host for
 microphone access and needs only numpy, whereas the training environment pins torch
 and tensorflow. Keeping them apart means recording does not need the trainer's stack.
 
-Capture goes through ffmpeg's avfoundation input, matching test_model.py, so there
-is no PyAudio/PortAudio to build - just `ffmpeg` on PATH.
+Capture defaults to PyAudio. `--backend ffmpeg` is kept as a fallback for hosts
+without PortAudio, but it is not the recommended path: recordings made through it
+came out with audible clicks and pops that PyAudio's did not. Both backends run
+through the same code path, so that difference is in the capture, not in how it is
+driven.
+
+Worth knowing that the level metering did NOT catch this. Peak and SNR describe
+level and steady background noise; an impulsive click is brief enough to move
+neither, so those takes measured well (SNR 38 dB) while sounding wrong. Listen to a
+few clips before committing to a long session - the numbers are necessary, not
+sufficient.
+
+PyAudio needs PortAudio:  brew install portaudio && uv sync --extra pyaudio
 
 Usage:
     cd record_real_sample
@@ -93,8 +104,25 @@ def measure(speech: np.ndarray, noise: np.ndarray):
     return peak_dbfs, noise_dbfs, snr, clipped
 
 
-def list_devices():
-    """Print avfoundation audio input devices and their numbers."""
+def list_devices(backend: str = "ffmpeg"):
+    """Print audio input devices and their numbers.
+
+    Device numbering is per backend - avfoundation and PortAudio enumerate
+    separately - so --device from one is not valid for the other.
+    """
+    if backend == "pyaudio":
+        import pyaudio
+        pa = pyaudio.PyAudio()
+        try:
+            print("Audio input devices (use the number with --device):")
+            for i in range(pa.get_device_count()):
+                info = pa.get_device_info_by_index(i)
+                if info.get("maxInputChannels", 0) > 0:
+                    print(f"  {i}: {info['name']}")
+        finally:
+            pa.terminate()
+        return
+
     out = subprocess.run(
         ["ffmpeg", "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
         capture_output=True, text=True,
@@ -136,44 +164,103 @@ def read_exact(pipe, nbytes: int):
     return buf
 
 
-def record_sample(filename: str, device: str):
-    """Record one sample, cueing once the stream is live. Returns its levels."""
-    proc = open_stream(device)
-    if proc.stdout is None:
-        raise SystemExit("failed to open ffmpeg pipes")
+MIC_HINT = ("could not open the microphone. If this is the first run, macOS may be "
+            "waiting on a microphone permission prompt for your terminal.")
 
-    try:
-        # An input device does not deliver usable audio the instant it opens. Read
-        # WARMUP seconds first so the cue below lands on an already-running stream -
-        # cueing before the device settles loses the first fraction of a second of
-        # speech and clips the word onset (the "h" in "hey"). This audio is not
-        # written to the sample, but its second half is kept as a noise-floor
-        # reference; the first half can still hold the device settling.
-        warmup = read_exact(proc.stdout, int(SAMPLE_RATE * WARMUP) * SAMPLE_WIDTH)
-        if warmup is None:
-            err = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
-            raise SystemExit(
-                "ffmpeg could not open the microphone. If this is the first run, macOS "
-                "may be waiting on a microphone permission prompt for your terminal.\n"
-                + err)
 
-        print("SPEAK NOW!")
-        audio = read_exact(proc.stdout, int(SAMPLE_RATE * DURATION) * SAMPLE_WIDTH)
-        if audio is None:
-            raise SystemExit("microphone stream ended mid-recording")
-    finally:
-        proc.kill()
-        proc.wait()
+def capture(backend: str, device: str, warmup_s: float, duration_s: float,
+            on_chunk=None, cue: str = ""):
+    """Record warm-up audio, then `duration_s` of speech. Returns both as int16.
+
+    One entry point for both backends so the two are genuinely comparable: the
+    warm-up handling, the cue timing and the framing are identical, and only the
+    capture library differs. Anything that differs in the resulting audio is then
+    attributable to the backend rather than to how it was driven.
+
+    `on_chunk` is called with each block as it arrives, for the live level meter.
+    Returning False from it stops the capture early.
+    """
+    step = SAMPLE_RATE // 10 * SAMPLE_WIDTH                # 100 ms
+    warmup_bytes = int(SAMPLE_RATE * warmup_s) * SAMPLE_WIDTH
+    total_bytes = int(SAMPLE_RATE * duration_s) * SAMPLE_WIDTH
+
+    if backend == "pyaudio":
+        import pyaudio
+        pa = pyaudio.PyAudio()
+        try:
+            stream = pa.open(format=pyaudio.paInt16, channels=CHANNELS,
+                             rate=SAMPLE_RATE, input=True,
+                             input_device_index=int(device) if device else None,
+                             frames_per_buffer=step // SAMPLE_WIDTH)
+        except Exception as e:
+            pa.terminate()
+            raise SystemExit(f"PyAudio {MIC_HINT}\n{e}")
+
+        def read(n):
+            return stream.read(n // SAMPLE_WIDTH, exception_on_overflow=False)
+
+        try:
+            warmup = read(warmup_bytes)
+            if cue:
+                print(cue)
+            chunks, got = [], 0
+            while got < total_bytes:
+                chunk = read(min(step, total_bytes - got))
+                chunks.append(chunk)
+                got += len(chunk)
+                if on_chunk and on_chunk(chunk, got) is False:
+                    break
+        finally:
+            stream.stop_stream()
+            stream.close()
+            pa.terminate()
+    else:
+        proc = open_stream(device)
+        if proc.stdout is None:
+            raise SystemExit("failed to open ffmpeg pipes")
+        try:
+            warmup = read_exact(proc.stdout, warmup_bytes)
+            if warmup is None:
+                err = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+                raise SystemExit(f"ffmpeg {MIC_HINT}\n{err}")
+            if cue:
+                print(cue)
+            chunks, got = [], 0
+            while got < total_bytes:
+                chunk = read_exact(proc.stdout, min(step, total_bytes - got))
+                if chunk is None:
+                    break
+                chunks.append(chunk)
+                got += len(chunk)
+                if on_chunk and on_chunk(chunk, got) is False:
+                    break
+        finally:
+            proc.kill()
+            proc.wait()
+
+    return (np.frombuffer(b"".join(chunks), dtype=np.int16),
+            np.frombuffer(warmup[len(warmup) // 2:], dtype=np.int16))
+
+
+def record_sample(filename: str, device: str, backend: str = "ffmpeg"):
+    """Record one sample, cueing once the stream is live. Returns its levels.
+
+    The device does not deliver usable audio the instant it opens, so WARMUP
+    seconds are read first and the cue lands on an already-running stream - cueing
+    before it settles loses the word onset (the "h" in "hey"). That audio is not
+    written to the sample, but its second half is kept as a noise-floor reference.
+    """
+    audio, noise = capture(backend, device, WARMUP, DURATION, cue="SPEAK NOW!")
+    if audio.size == 0:
+        raise SystemExit("microphone stream ended before any audio arrived")
 
     with wave.open(filename, 'wb') as wf:
         wf.setnchannels(CHANNELS)
         wf.setsampwidth(SAMPLE_WIDTH)
         wf.setframerate(SAMPLE_RATE)
-        wf.writeframes(audio)
+        wf.writeframes(audio.tobytes())
 
-    speech = np.frombuffer(audio, dtype=np.int16)
-    noise = np.frombuffer(warmup[len(warmup) // 2:], dtype=np.int16)
-    return measure(speech, noise)
+    return measure(audio, noise)
 
 
 def segment_utterances(data, noise_rms, min_ms=180.0, max_ms=2000.0,
@@ -237,53 +324,30 @@ def segment_utterances(data, noise_rms, min_ms=180.0, max_ms=2000.0,
     return segments, rejects
 
 
-def record_continuous(device: str, seconds: float):
+def record_continuous(device: str, seconds: float, backend: str = "ffmpeg"):
     """Record one long block, returning (audio, room-tone reference).
 
     The whole block is held in memory - three minutes is under 6 MB - so
     segmentation can use statistics over the entire recording rather than having
     to decide about each utterance as it arrives.
     """
-    proc = open_stream(device)
-    if proc.stdout is None:
-        raise SystemExit("failed to open ffmpeg pipes")
+    print(f"RECORDING for {seconds:.0f}s - say the wake word, pause, repeat.")
+    print("Ctrl-C stops early and keeps what has been recorded.\n")
+
+    def meter(chunk, got):
+        block = np.frombuffer(chunk, dtype=np.int16)
+        level = 20 * np.log10(max(int(np.abs(block).max()), 1) / FULL_SCALE)
+        bar = "#" * max(0, int((level + 60) / 3))
+        print(f"\r  {got / SAMPLE_WIDTH / SAMPLE_RATE:5.1f}s  "
+              f"{level:>6.1f} dBFS  {bar:<20}", end="", flush=True)
 
     try:
-        warmup = read_exact(proc.stdout, int(SAMPLE_RATE * WARMUP) * SAMPLE_WIDTH)
-        if warmup is None:
-            err = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
-            raise SystemExit(
-                "ffmpeg could not open the microphone. If this is the first run, macOS "
-                "may be waiting on a microphone permission prompt for your terminal.\n"
-                + err)
-
-        print(f"RECORDING for {seconds:.0f}s - say the wake word, pause, repeat.")
-        print("Ctrl-C stops early and keeps what has been recorded.\n")
-
-        chunks, total = [], int(SAMPLE_RATE * seconds) * SAMPLE_WIDTH
-        step = SAMPLE_RATE // 10 * SAMPLE_WIDTH          # 100 ms
-        got = 0
-        try:
-            while got < total:
-                chunk = read_exact(proc.stdout, min(step, total - got))
-                if chunk is None:
-                    break
-                chunks.append(chunk)
-                got += len(chunk)
-                block = np.frombuffer(chunk, dtype=np.int16)
-                level = 20 * np.log10(max(int(np.abs(block).max()), 1) / FULL_SCALE)
-                bar = "#" * max(0, int((level + 60) / 3))
-                print(f"\r  {got / SAMPLE_WIDTH / SAMPLE_RATE:5.1f}s  "
-                      f"{level:>6.1f} dBFS  {bar:<20}", end="", flush=True)
-        except KeyboardInterrupt:
-            print("\n  stopped early")
-        print()
-    finally:
-        proc.kill()
-        proc.wait()
-
-    return (np.frombuffer(b"".join(chunks), dtype=np.int16),
-            np.frombuffer(warmup[len(warmup) // 2:], dtype=np.int16))
+        audio, noise = capture(backend, device, WARMUP, seconds, on_chunk=meter)
+    except KeyboardInterrupt:
+        print("\n  stopped early")
+        raise
+    print()
+    return audio, noise
 
 
 def level_report(peak_dbfs, noise_dbfs, snr, clipped):
@@ -385,7 +449,14 @@ def main():
     parser.add_argument("--output-dir", default=str(REPO_ROOT / "my_real_samples"),
                         help="Output directory (default: %(default)s). Use a "
                              "per-speaker subdirectory when several people record.")
-    parser.add_argument("--device", default="0", help="avfoundation audio device number")
+    parser.add_argument("--backend", choices=["pyaudio", "ffmpeg"], default="pyaudio",
+                        help="Capture library (default: %(default)s). ffmpeg is kept "
+                             "as a fallback for hosts without PortAudio, but its "
+                             "recordings carried audible clicks - see the note at the "
+                             "top of this file.")
+    parser.add_argument("--device", default="0",
+                        help="Input device number. Numbering is per backend - run "
+                             "--list-devices with the same --backend.")
     parser.add_argument("--continuous", type=float, metavar="SECONDS",
                         help="Record one block of this length and split it into one "
                              "clip per utterance, instead of one ENTER per take. "
@@ -413,7 +484,7 @@ def main():
     args = parser.parse_args()
 
     if args.list_devices:
-        list_devices()
+        list_devices(args.backend)
         return
 
     output_dir = Path(args.output_dir)
@@ -455,7 +526,7 @@ def main():
         return
 
     if args.continuous:
-        audio, noise = record_continuous(args.device, args.continuous)
+        audio, noise = record_continuous(args.device, args.continuous, args.backend)
         if args.keep_raw:
             raw = output_dir / f"{safe_name}_raw_{int(time.time())}.wav"
             with wave.open(str(raw), "wb") as wf:
