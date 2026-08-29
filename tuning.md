@@ -47,7 +47,53 @@ Gates worth adopting, all on held-out data:
 
 ---
 
-## Run 8 (ready): `max_negative_weight` 2000 -> 4000
+## Run 8: `7aad08e` — the weight works, but only as a threshold in disguise
+
+`max_negative_weight` 2000 -> 4000, single variable.
+
+At threshold 0.5:
+
+| | run 7 | run 8 |
+|---|---:|---:|
+| `extend` + `hey_other` FA | 7/32 | **3/32** |
+| held-out plain | **89%** | 77% |
+| held-out run-on | **56%** | 37% |
+
+False accepts beat the < 4/32 target; both detection floors failed (>= 85% plain,
+>= 50% run-on). By the pre-registered criteria, run 8 fails.
+
+**But comparing at a fixed threshold conflates model quality with operating point.**
+Detection at matched false-accept counts, threshold tuned per model:
+
+| FA | run 7 plain/run-on | run 8 plain/run-on |
+|---|---|---|
+| 2/32 | **74% / 25%** | 60% / 16% |
+| 3/32 | 77% / 26% | 77% / **37%** |
+| 4/32 | **83%** / 37% | 77% / **42%** |
+| 5/32 | **83%** / 39% | 77% / **44%** |
+
+Neither dominates. Run 8 is better on run-ons at loose operating points, run 7 better
+on plain throughout and clearly better at the tight 2/32 end the gate asks for. Most
+of what the weight bought was movement along the same trade-off curve - which the
+detection threshold provides for free, without retraining.
+
+**Conclusion: revert to 2000.** Use the threshold to choose the operating point.
+
+**A correction:** it was predicted above that the weight would not reach near-misses,
+because openwakeword's auto-escalation is driven by a general-speech validation set.
+It did reach them (7/32 -> 3/32). That reasoning confused the auto-escalation with the
+base weight, which applies to every negative including the confusables.
+
+**The < 2/32 gate looks unreachable at usable detection rates.** The best any model
+manages there is 74% plain / 25% run-on. The gate was set from a single measurement of
+the original model and against a corpus that is adversarial by construction - a fifth
+of it phrase-extending. It should probably be restated as a rate the deployment can
+actually tolerate, chosen alongside a threshold, rather than treated as a target to
+train toward.
+
+---
+
+## Run 8 setup: `max_negative_weight` 2000 -> 4000
 
 The first experiment aimed directly at `extend`, which has failed every run since run
 2 and has only ever moved as a side effect of margin changes. `RUNON_TAIL_MS` stays at
