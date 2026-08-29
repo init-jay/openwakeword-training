@@ -47,6 +47,42 @@ Gates worth adopting, all on held-out data:
 
 ---
 
+## Run 9 (ready): widen the positive speed range
+
+The last measured failure with no fix applied. A synthetic sweep of run 4 detected
+6/6 up to 1.25x, then 3/6 at 1.40x and 2/6 at 1.60x - training rendered nothing above
+1.3x, so the model fails just outside the range it saw, while remaining fine below it
+(0.55x gave 6/6). The asymmetry says widen the top only.
+
+    PLAIN_SPEEDS  (0.7, 1.3) -> (0.7, 1.6)
+    RUNON_SPEEDS  [0.8, 0.9, 1.0, 1.1, 1.2] -> [0.8, 1.0, 1.2, 1.4, 1.6]
+
+Both move together because they are one variable. Covering fast phrase-alone
+renderings while leaving run-ons at 1.2x would leave fast run-on speech - the
+commonest real case - untrained.
+
+Kokoro's 1.6x output was checked before committing to it: durations scale correctly
+(1.4-1.6x), both words present in the timestamps, levels intact. "hey seeree" renders
+in 390-590 ms there, which is the same range as the fast real clips run 4 missed.
+
+**Not strictly single-variable.** The real corpus grew since run 8 - ryan 35 -> 42 and
+a new speaker, jen, with 8 clips. That is +7.7% of the real set against an expected
+large speed effect, so it should not obscure the result, but a *third speaker* is a
+categorical change and anything it moves will be hard to attribute.
+
+| | run 7 | run 9 succeeds if |
+|---|---:|---|
+| synthetic speed 1.40x / 1.60x | 3/6, 2/6 | **6/6, >= 4/6** |
+| held-out plain | 89% | holds >= 85% |
+| held-out run-on | 56% | holds >= 50% |
+| `extend` + `hey_other` FA | 7/32 | does not worsen |
+
+Watch false accepts particularly: faster positives are shorter, and a shorter phrase
+is acoustically closer to the first syllable of "hey serious". This change could trade
+against the near-miss problem.
+
+---
+
 ## Run 8: `7aad08e` — the weight works, but only as a threshold in disguise
 
 `max_negative_weight` 2000 -> 4000, single variable.
