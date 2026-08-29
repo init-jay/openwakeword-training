@@ -1,0 +1,19 @@
+[project]
+name = "record-real-sample"
+version = "0.1.0"
+description = "Record real voice samples for wake word training"
+requires-python = ">=3.10"
+
+# Deliberately separate from the training environment: this runs on the host for
+# microphone access and must not drag in the pinned torch/tensorflow stack that
+# requirements.txt carries for the trainer.
+#
+# No PyAudio. Capture goes through ffmpeg's avfoundation input, the same approach
+# test_model.py uses, which avoids building PortAudio from source just to record.
+# `ffmpeg` needs to be on PATH.
+dependencies = [
+    "numpy",
+]
+
+[tool.uv]
+package = false

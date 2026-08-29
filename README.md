@@ -57,9 +57,12 @@ docker compose run --rm trainer ./setup-data.sh
 Recording 20-50 samples of your actual voice significantly improves detection. This runs on your host machine (needs microphone access):
 
 ```bash
-pip install pyaudio numpy scipy
-python record_samples.py --wake-word "hey cal"
+cd record_real_sample
+uv run record_samples.py --list-devices              # find your mic
+uv run record_samples.py --wake-word "hey cal"
 ```
+
+This has its own uv environment and captures through ffmpeg (no PyAudio/PortAudio build), so it needs only `ffmpeg` on your PATH. Samples land in the repo's `my_real_samples/` regardless of where you run it from.
 
 - Press ENTER, then wait for "SPEAK NOW!" before speaking
 - Say your wake word naturally
