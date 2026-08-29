@@ -91,19 +91,26 @@ PLAIN_SPEEDS = (0.7, 1.3)
 # The timestamps remove both the bias and the variance. The fallback path still uses
 # the v2 estimate, which is why it reports itself loudly.
 #
-# The RANGE STARTS AT 80 ms, NOT ZERO, and that floor is the whole point. Plain
-# positives always carry ~80 ms after the phrase (30 ms trim pad + ~50 ms residual),
-# so they never show the model a clip that ends exactly where the word does. Once
-# the cut became exact, a tail of 0 did exactly that - and with 40% of positives
-# being run-ons, run 5 learned to fire with the phrase flush against the window
-# edge: it scored 0.891 at a zero gap, latency went to -20 ms, and extend false
-# accepts TRIPLED from 4/32 to 12/32.
+# THE RANGE MUST NOT START AT ZERO, and how far above zero is the open question.
 #
-# That margin is not padding. It is what lets the model hear that the word ENDED
+# The margin is not padding. It is what lets the model hear that the word ENDED
 # rather than continued, which is the entire discrimination between "hey seeree"
-# and "hey serious". An earlier version of this comment claimed a short tail "loses
-# nothing that matters"; run 5 disproved it.
-RUNON_TAIL_MS = (80.0, 200.0)
+# and "hey serious". Measured against held-out real recordings, both run-on
+# detection and false accepts move monotonically with it:
+#
+#   effective margin   held-out run-on   extend+hey_other FA
+#     ~50 ms (run 5)         28%              12/32
+#    ~140 ms (run 6)         40%               8/32
+#    ~200 ms (run 4)         46%               6/32
+#
+# Run 4's ~200 ms was an accident - a +153 ms bias in the phrase-alone estimate that
+# the timestamp cut later removed. It still outperformed both settings chosen on
+# purpose. Run 7 tests (150, 300) to find whether the optimum is above 200 ms.
+#
+# Note run 4 also had half the real recordings, so the trend is not fully isolated.
+# If run 7 does not beat 46% run-on and 6/32 false accepts, the relationship was
+# confounded and this should go back to (80, 200).
+RUNON_TAIL_MS = (150.0, 300.0)
 
 # Confusable negatives, per wake word.
 #
