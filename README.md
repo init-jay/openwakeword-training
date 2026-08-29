@@ -131,10 +131,10 @@ Measured on an RTX 3090 with 42 Kokoro voices at `--samples-per-voice 300` (~20K
 
 | stage | time | share |
 |---|---:|---:|
-| TTS generation (2 Kokoro containers) | ~17 min | 49% |
-| Feature computation (GPU) | ~4 min | 11% |
-| Model training | ~14 min | 40% |
-| **total** | **~35 min** | |
+| TTS generation (2 Kokoro containers, batched) | ~5 min | 31% |
+| Feature computation (GPU) | ~4 min | 25% |
+| Model training (GPU-resident features) | ~7 min | 44% |
+| **total** | **~16 min** | |
 
 How it got there, since the defaults matter:
 
@@ -143,6 +143,8 @@ How it got there, since the defaults matter:
 | CPU feature computation, 1 Kokoro | 83 min |
 | + `onnxruntime-gpu` (features 36 → 4 min) | 52 min |
 | + a second Kokoro container (TTS 34 → 17 min) | 35 min |
+| + GPU-resident features (training 14 → 7 min) | 29 min |
+| + batched TTS (TTS 17 → 5 min) | ~16 min |
 
 **Why more than one Kokoro container:** a Kokoro process is single-threaded and saturates exactly one core, so concurrent requests to one instance simply queue (4 client threads measured 15.0 it/s against 14.1 sequential) while adding instances scales almost linearly (2 instances: 28.7 it/s) — the GPU sits at ~21% throughout, so cores, not the GPU, are the limit.
 
@@ -206,6 +208,7 @@ python eval_model.py --model my_custom_model/hey_cal.onnx \
 | `--layer-size` | 64 | Network size (32, 64, or 128) |
 | `--kokoro-url` | http://localhost:8880 | Kokoro TTS endpoint. Comma-separate several to split the work across them |
 | `--tts-workers` | 2 | Concurrent requests **per server**; total is this times the server count |
+| `--tts-batch` | 16 | Utterances per Kokoro request. A short request is ~75% fixed overhead, so batching is ~3x faster; clips are split apart on the server's word timestamps. `1` disables it |
 | `--augmentation-rounds` | 3 | Differently-augmented copies of each clip. Multiplies training data at no TTS cost |
 | `--runon-fraction` | 0.4 | Share of positives where the phrase runs straight into a command rather than silence |
 | `--real-copies` | 10 | Copies of each real recording in the positive set. Each copy is augmented independently, so this multiplies variants, not just weight |
