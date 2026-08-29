@@ -89,7 +89,52 @@ run-on.
 
 ---
 
-## Run 10 (ready): weight real recordings 3x -> 10x
+## Run 10: `eea1c56` — real-sample weighting is the biggest lever found
+
+`--real-copies 3 -> 10`, single variable. Real goes from 4.4% to 13.4% of the positive
+class, using the same 195 clips.
+
+| | run 7 | run 9 | run 10 |
+|---|---:|---:|---:|
+| held-out plain (35) | 89% | **97%** | 91% |
+| **held-out run-on (57)** | 56% | 53% | **77%** |
+| `extend` + `hey_other` FA | 7/32 | 7/32 | **6/32** |
+| `running` FA | 1/12 | 0/12 | 2/12 |
+| median latency | 83 ms | 91 ms | **49 ms** |
+| trained-set plain (56) | 98% | 95% | 98% |
+
+**Run-on rose 14 clips** (30/57 -> 44/57), far outside noise. Plain fell 2 clips on a
+35-clip set, which is not. So the result is unambiguous: **the synthetic/real balance
+was the constraint**, and it was reachable by reweighting alone - no new recordings.
+
+This was the outcome bet against when staging it. Duplication is weighting, not
+augmentation, so overfitting to the 195 clips was the expected failure. The trained-set
+number did rise (95% -> 98%), which is that signature, but held-out run-on rose far
+more, so generalisation won.
+
+**Why run-on and not plain** is worth noting: the real recordings are all plain wake
+words - there are no real run-ons in training. Weighting them did not add run-on
+examples, yet run-on improved most. The likeliest reading is that real speech teaches
+acoustics (room, mic, delivery) that synthetic speech does not, and that matters most
+in the hardest case rather than the easiest.
+
+**Costs:** `running` false accepts went 0/12 -> 2/12, worst 0.951 - more real positives
+makes the model more responsive to real-ish speech generally. Worth watching if it
+grows.
+
+**Run 10 is the ship candidate:** best run-on by 21 points, plain within noise of best,
+best false accepts since run 4, second-best latency.
+
+**What this implies for the next lever.** Reweighting 195 clips bought 24 points of
+run-on. Adding real *variety* - jen's clips and ryan's newest are still only on the
+recording machine, and neither has a held-out set - should do at least as well and
+carries no overfitting risk. That is now clearly the highest-value work, ahead of any
+further parameter tuning. Pushing `--real-copies` higher (20x) is the cheaper probe but
+runs into the overfitting the trained-set number is already hinting at.
+
+---
+
+## Run 10 setup: weight real recordings 3x -> 10x
 
 A cheap probe of the dominant hypothesis for the held-out gap. Positives are 95.6%
 synthetic - 12,600 Kokoro clips against 195 real from 2 speakers on the training
