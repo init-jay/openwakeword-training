@@ -47,6 +47,40 @@ Gates worth adopting, all on held-out data:
 
 ---
 
+## Run 10 (ready): weight real recordings 3x -> 10x
+
+A cheap probe of the dominant hypothesis for the held-out gap. Positives are 95.6%
+synthetic - 12,600 Kokoro clips against 210 real from 3 speakers - and every
+measurement this session where synthetic and real disagreed, real was worse:
+
+* held-out plain 89% against 96% on the trained set
+* held-out run-on 56% against 100% on the synthetic `cmd_run` sweep
+* run 2 scored 83% synthetic `cmd_run` while detecting 3/57 real run-ons
+
+`--real-copies 3 -> 10` moves real from 4.8% to 14.3% of the positive class, with no
+recording effort. Batch class balance is unaffected (`batch_n_per_class` fixes that),
+so this only changes how often a real clip is drawn *within* the positive class.
+
+**This is a probe, not a fix.** Duplication is weighting, not augmentation - the same
+210 clips repeated - so it buys emphasis without variety and risks overfitting to
+those specific recordings. The held-out set is what will show that.
+
+| | run 9 | run 10 |
+|---|---|---|
+| held-out plain | baseline | **rises** -> balance is the constraint |
+| held-out run-on | baseline | **rises** -> same |
+| trained-set plain | ~96% | if this rises while held-out falls, it is overfitting |
+| `extend` + `hey_other` FA | baseline | watch: fewer distinct positives may cost precision |
+
+The interesting failure is held-out flat while trained-set climbs. That would say the
+synthetic/real ratio is not the constraint, the *variety* of real speech is - and the
+answer is more speakers and more sessions, not more weight on the clips already held.
+
+Keep the corpus fixed for this run: no new recordings between run 9 and run 10, or
+the comparison is lost.
+
+---
+
 ## Run 9 (ready): widen the positive speed range
 
 The last measured failure with no fix applied. A synthetic sweep of run 4 detected
