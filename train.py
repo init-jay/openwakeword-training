@@ -599,17 +599,23 @@ def generate_runon_samples(pool: "KokoroPool", voices: list, output_dir: Path,
 def copy_real_samples(wake_word: str, output_dir: Path, copies: int = 10) -> int:
     """Copy real voice recordings to training directory, `copies` times each.
 
-    The duplication is a weighting, not augmentation - the same audio repeated, so
-    it buys emphasis without variety. That is a real risk of overfitting to these
-    specific recordings, which is why the held-out set exists.
+    The copies are NOT redundant. They are written before openwakeword's
+    augmentation stage, which globs this whole directory, so each copy is augmented
+    independently: background noise from `background_paths` at p=0.75, a room
+    impulse response, EQ, pitch shift and gain. AddBackgroundNoise runs
+    mode="per_batch" and the copies are named real_{i}_... so sorting spreads them
+    ~195 apart - every copy lands in a different batch and draws different noise.
+    With augmentation_rounds=3 on top, 10 copies means 30 acoustically distinct
+    variants of each recording, not 30 identical ones.
 
-    Raised 3 -> 10 for run 10, as a probe of the dominant hypothesis for the
-    held-out gap: positives are 95.6% synthetic (12,600 Kokoro clips against 210
-    real from 3 speakers), and every measurement this session where synthetic and
-    real disagreed, real was worse. At 10x, real goes from 4.4% to ~14% of the
-    positive class. Class balance in a batch is unaffected - batch_n_per_class
-    fixes that - so this only changes how often a real clip is drawn WITHIN the
-    positive class.
+    That is why raising this from 3 to 10 in run 10 improved generalisation instead
+    of overfitting: held-out run-on detection went 53% -> 77%, the largest single
+    effect measured. Real clips are ~4% of the positive set by default and dominate
+    the result, because real speech carries room, mic and delivery characteristics
+    that Kokoro does not.
+
+    Batch class balance is unaffected (batch_n_per_class fixes that), so this only
+    changes how often a real clip is drawn WITHIN the positive class.
 
     Recordings may sit loose in my_real_samples/ or be grouped one directory per
     speaker (my_real_samples/jay/, my_real_samples/alex/, ...). Both layouts are

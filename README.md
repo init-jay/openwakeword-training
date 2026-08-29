@@ -33,7 +33,7 @@ Results depend heavily on the wake word and on how much real speech you supply �
 
 Ten training runs, each measured rather than assumed. The findings that would transfer to any wake word:
 
-**Real recordings are worth far more than their share of the corpus.** They are ~4% of the positives by default and they dominate the result. Raising `--real-copies` from 3 to 10 — reweighting the same 195 clips, no new recordings — took detection of run-on speech from 53% to 77% in a single training run. That is the largest effect found across ten runs, bigger than the trailing margin, the speed range, or the negative-class loss weight. If you only change one thing, record more real speech and weight it heavily.
+**Real recordings are worth far more than their share of the corpus.** They are ~4% of the positives by default and they dominate the result. Raising `--real-copies` from 3 to 10 — the same 195 clips, no new recordings — took detection of run-on speech from 53% to 77% in a single training run. The copies are duplicated *before* augmentation, so each one picks up different background noise and reverb; ten copies become thirty acoustically distinct variants. That is the largest effect found across ten runs, bigger than the trailing margin, the speed range, or the negative-class loss weight. If you only change one thing, record more real speech and weight it heavily.
 
 **Measure on recordings made after the model trains.** `train.py` trains on everything in `my_real_samples/`, so scoring against that directory reports training accuracy. It overstated detection by ~10 points here, and hid a much larger gap on run-on speech. Record a held-out set into a directory outside that tree.
 
@@ -208,7 +208,7 @@ python eval_model.py --model my_custom_model/hey_cal.onnx \
 | `--tts-workers` | 2 | Concurrent requests **per server**; total is this times the server count |
 | `--augmentation-rounds` | 3 | Differently-augmented copies of each clip. Multiplies training data at no TTS cost |
 | `--runon-fraction` | 0.4 | Share of positives where the phrase runs straight into a command rather than silence |
-| `--real-copies` | 10 | How many times each real recording is duplicated into the positive set. Weighting, not augmentation |
+| `--real-copies` | 10 | Copies of each real recording in the positive set. Each copy is augmented independently, so this multiplies variants, not just weight |
 | `--max-negative-weight` | 2000 | How hard false positives are penalised. Raising it trades detection for precision — but so does the detection threshold, for free |
 | `--data-dir` | `.` | Training data directory (`/app/data` for Docker) |
 | `--no-trim` | off | Skip silence trimming before augmentation (not recommended) |
