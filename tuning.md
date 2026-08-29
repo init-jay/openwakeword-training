@@ -47,7 +47,50 @@ Gates worth adopting, all on held-out data:
 
 ---
 
-## Run 6 (in flight): `3083d45`
+## Run 6: `3083d45` — best plain detection, and the margin prediction half failed
+
+| | run 2 | run 4 | run 5 | run 6 |
+|---|---:|---:|---:|---:|
+| held-out plain (35) | 63% | 83% | 80% | **91%** |
+| held-out run-on (57) | 5% | **46%** | 28% | 40% |
+| `extend` + `hey_other` FA | 4/32 | 6/32 | 12/32 | 8/32 |
+| median latency | 70 ms | 77 ms | -20 ms | **48 ms** |
+| alignment band | 80-240 ms | 120-320 ms | 0-280 ms | 0-440 ms |
+
+**Prediction failed on its own diagnostic.** The firing band was predicted to lift off
+0 ms once `RUNON_TAIL_MS` was floored at 80 ms. It did not - the band still starts at
+0 ms and got *wider*. The peak median rose from 0.960 to 0.989, so this is a more
+confident model firing across a broader range, not one ignoring the margin. "Fires at
+0 ms" conflates *learned to need no margin* with *confident enough to fire anyway*,
+and is not the clean diagnostic it was treated as.
+
+**Predicted correctly:** false accepts improved (12/32 -> 8/32), and run-on detection
+recovered (28% -> 40%).
+
+**What the runs actually show,** ordered by the effective trailing margin their run-on
+positives carried:
+
+| | effective margin | held-out run-on | extend FA |
+|---|---:|---:|---:|
+| run 5 | ~50 ms | 28% | 12/32 |
+| run 6 | ~140 ms | 40% | 8/32 |
+| run 4 | ~200 ms | 46% | 6/32 |
+
+Monotonic on both. More trailing margin gives better real run-on detection *and* fewer
+false accepts. Run 4's ~200 ms came from the +153 ms estimate bias - the bug that got
+"fixed" was closer to optimal than either deliberate setting since.
+
+Note run 6 also carries ~2x the real recordings, which is the likelier cause of the
+jump in plain detection (83% -> 91%) and cannot be separated from the margin change.
+
+**Next experiment:** `RUNON_TAIL_MS = (150, 300)`, holding everything else fixed. If
+run-on detection exceeds 46% and false accepts fall below 6/32, the margin relationship
+holds and the optimum is above 200 ms. If it does not, the trend was confounded by the
+real-data differences and the margin should be left where it is.
+
+---
+
+## Run 6 details: `3083d45`
 
 Two changes against run 5, one of them not visible in git:
 
