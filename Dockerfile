@@ -72,6 +72,14 @@ RUN python3 /tmp/honour-augmentation-rounds.py openwakeword/openwakeword/train.p
 COPY patches/feature-device-selection.py /tmp/feature-device-selection.py
 RUN python3 /tmp/feature-device-selection.py openwakeword/openwakeword/train.py
 
+# Patch: hold the training features in VRAM rather than mmap. The 17.28 GB
+# ACAV100M array against 20 GB of RAM leaves training stalling on page faults -
+# GPU at 14%, CPU 37% idle, 7.2 GB swapped. Requires `docker compose stop kokoro
+# kokoro2` before training so their CUDA contexts are not holding ~2.4 GB.
+COPY patches/gpu-resident-features.py /tmp/gpu-resident-features.py
+RUN python3 /tmp/gpu-resident-features.py openwakeword/openwakeword/data.py \
+    && python3 /tmp/gpu-resident-features.py openwakeword/openwakeword/train.py
+
 # Download embedding models (small, safe to bake into image)
 RUN mkdir -p openwakeword/openwakeword/resources/models \
     && curl -L -o openwakeword/openwakeword/resources/models/embedding_model.onnx \
