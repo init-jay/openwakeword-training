@@ -477,7 +477,7 @@ def generate_kokoro_sample(kokoro_url: str, voice: str, text: str, output_dir: P
     return True
 
 
-def run_jobs(jobs, worker, desc: str, workers: int):
+def run_jobs(jobs, worker, desc: str, workers: int, weights=None):
     """Run `worker` over `jobs` in a thread pool, with a progress bar.
 
     Threads rather than processes because every job is a blocking HTTP request to
@@ -497,12 +497,18 @@ def run_jobs(jobs, worker, desc: str, workers: int):
 
     # Workers return either a bool (one clip) or a count (a batch of clips);
     # int() covers both, since int(True) is 1.
+    #
+    # `weights` is how many clips each job produces. Without it the bar would count
+    # REQUESTS once batching is on, so "12 it/s" would mean 12 batches - roughly 190
+    # clips/s - and look like a slowdown against the pre-batching 28 clips/s. The bar
+    # counts clips either way.
+    weights = weights or [1] * len(jobs)
     success = 0
-    with tqdm(total=len(jobs), desc=desc) as pbar:
+    with tqdm(total=sum(weights), desc=desc, unit="clip") as pbar:
         with cf.ThreadPoolExecutor(max_workers=workers) as pool:
-            for result in pool.map(guarded, jobs):
+            for weight, result in zip(weights, pool.map(guarded, jobs)):
                 success += int(result)
-                pbar.update(1)
+                pbar.update(weight)
     return success
 
 
@@ -559,7 +565,8 @@ def generate_kokoro_samples(pool: "KokoroPool", voices: list, output_dir: Path,
             written += 1
         return written
 
-    written = run_jobs(jobs, render, desc, workers * len(pool))
+    written = run_jobs(jobs, render, desc, workers * len(pool),
+                       weights=[len(g) for _, _, g in jobs])
 
     print(f"  Generated {written}/{total} samples "
           f"({len(jobs)} request(s), batch {batch})")
@@ -712,7 +719,8 @@ def generate_runon_samples(pool: "KokoroPool", voices: list, output_dir: Path,
                                      kokoro_url, text)
         return written
 
-    success = run_jobs(jobs, render, desc, workers * len(pool))
+    success = run_jobs(jobs, render, desc, workers * len(pool),
+                       weights=[len(g) for _, _, g in jobs])
 
     print(f"  Generated {success}/{total} run-on samples "
           f"({len(jobs)} request(s), batch {batch})")
