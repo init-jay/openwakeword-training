@@ -176,6 +176,116 @@ def record_sample(filename: str, device: str):
     return measure(speech, noise)
 
 
+def segment_utterances(data, noise_rms, min_ms=180.0, max_ms=2000.0,
+                       gap_ms=250.0, pad_ms=100.0):
+    """Split a continuous recording into one clip per utterance.
+
+    Energy-gated against the measured room tone rather than a fixed level, so it
+    adapts to the room instead of needing a threshold tuned by hand. Frames above
+    the gate are grouped, runs closer together than `gap_ms` are merged (the pause
+    inside "hey ... seeree" must not split the phrase in two), and each run is
+    padded by `pad_ms` so the word onset and release survive.
+
+    Runs outside [min_ms, max_ms] are dropped and reported: a very short one is a
+    click or a breath, a very long one is two utterances run together or a stretch
+    of noise. Neither makes a usable positive, and a bad clip is worse than a
+    missing one - the corpus is only ~90 clips, so each is weighted heavily.
+
+    Returns (segments, rejects) as lists of (start, end, padded_ms, voiced_ms).
+    Both durations are carried because they answer different questions: the padded
+    one is the clip you get, the voiced one is what the accept/reject test used -
+    and reporting a rejection against the padded length mislabels a short fragment
+    at the end of a recording as "too long".
+    """
+    frame = SAMPLE_RATE // 100                      # 10 ms
+    n = len(data) // frame
+    if n < 2:
+        return [], []
+
+    frames = data[:n * frame].astype(np.float64).reshape(n, frame)
+    rms = np.sqrt(np.mean(frames ** 2, axis=1))
+
+    # 12 dB above room tone, but never below 5% of the loudest frame - that floor
+    # keeps a very quiet room from turning breathing into an "utterance".
+    gate = max(noise_rms * (10 ** (12 / 20)), rms.max() * 0.05)
+    voiced = np.flatnonzero(rms > gate)
+    if voiced.size == 0:
+        return [], []
+
+    merge = int(gap_ms / 10)
+    runs, current = [], [voiced[0], voiced[0]]
+    for i in voiced[1:]:
+        if i - current[1] <= merge:
+            current[1] = i
+        else:
+            runs.append(current)
+            current = [i, i]
+    runs.append(current)
+
+    pad = int(SAMPLE_RATE * pad_ms / 1000)
+    segments, rejects = [], []
+    for a, b in runs:
+        # Judge the run by its own length, not the padded clip's. Padding adds
+        # 2 * pad_ms, which would carry a 30 ms click past a 180 ms floor and let
+        # every click through as an "utterance".
+        voiced_ms = (b + 1 - a) * 10
+        start = max(0, a * frame - pad)
+        end = min(len(data), (b + 1) * frame + pad)
+        duration = (end - start) / SAMPLE_RATE * 1000
+        (segments if min_ms <= voiced_ms <= max_ms else rejects).append(
+            (start, end, duration, voiced_ms))
+    return segments, rejects
+
+
+def record_continuous(device: str, seconds: float):
+    """Record one long block, returning (audio, room-tone reference).
+
+    The whole block is held in memory - three minutes is under 6 MB - so
+    segmentation can use statistics over the entire recording rather than having
+    to decide about each utterance as it arrives.
+    """
+    proc = open_stream(device)
+    if proc.stdout is None:
+        raise SystemExit("failed to open ffmpeg pipes")
+
+    try:
+        warmup = read_exact(proc.stdout, int(SAMPLE_RATE * WARMUP) * SAMPLE_WIDTH)
+        if warmup is None:
+            err = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+            raise SystemExit(
+                "ffmpeg could not open the microphone. If this is the first run, macOS "
+                "may be waiting on a microphone permission prompt for your terminal.\n"
+                + err)
+
+        print(f"RECORDING for {seconds:.0f}s - say the wake word, pause, repeat.")
+        print("Ctrl-C stops early and keeps what has been recorded.\n")
+
+        chunks, total = [], int(SAMPLE_RATE * seconds) * SAMPLE_WIDTH
+        step = SAMPLE_RATE // 10 * SAMPLE_WIDTH          # 100 ms
+        got = 0
+        try:
+            while got < total:
+                chunk = read_exact(proc.stdout, min(step, total - got))
+                if chunk is None:
+                    break
+                chunks.append(chunk)
+                got += len(chunk)
+                block = np.frombuffer(chunk, dtype=np.int16)
+                level = 20 * np.log10(max(int(np.abs(block).max()), 1) / FULL_SCALE)
+                bar = "#" * max(0, int((level + 60) / 3))
+                print(f"\r  {got / SAMPLE_WIDTH / SAMPLE_RATE:5.1f}s  "
+                      f"{level:>6.1f} dBFS  {bar:<20}", end="", flush=True)
+        except KeyboardInterrupt:
+            print("\n  stopped early")
+        print()
+    finally:
+        proc.kill()
+        proc.wait()
+
+    return (np.frombuffer(b"".join(chunks), dtype=np.int16),
+            np.frombuffer(warmup[len(warmup) // 2:], dtype=np.int16))
+
+
 def level_report(peak_dbfs, noise_dbfs, snr, clipped):
     """One line of feedback, plus any warning worth acting on before the next take."""
     parts = [f"peak {peak_dbfs:>6.1f} dBFS"]
@@ -197,6 +307,78 @@ def level_report(peak_dbfs, noise_dbfs, snr, clipped):
         print(f"    NOISY: only {snr:.0f} dB above the room. Quieter room, or closer mic.")
 
 
+def write_segments(audio, noise, output_dir: Path, safe_name: str, args):
+    """Cut a continuous recording into clips and write them. Returns their levels.
+
+    With args.dry_run nothing is written - the split is only reported. That matters
+    for --resegment: the clips from a first pass are already on disk, so a second
+    pass with different parameters would write a duplicate of every one of them.
+    """
+    noise_rms = float(np.sqrt(np.mean(noise.astype(np.float64) ** 2))) if noise.size else 0.0
+    segments, rejects = segment_utterances(
+        audio, noise_rms, min_ms=args.min_ms, max_ms=args.max_ms, gap_ms=args.gap_ms)
+
+    print(f"\nFound {len(segments)} utterance(s) in "
+          f"{len(audio) / SAMPLE_RATE:.0f}s of audio")
+    if rejects:
+        short = sum(1 for *_, voiced in rejects if voiced < args.min_ms)
+        print(f"  skipped {len(rejects)}: {short} too short (clicks, breaths, or an "
+              f"utterance clipped by the end of the recording), "
+              f"{len(rejects) - short} too long (merged or noise)")
+        for start, _, _, voiced in rejects:
+            why = "short" if voiced < args.min_ms else "long"
+            print(f"    at {start / SAMPLE_RATE:>6.1f}s  {voiced:>5.0f}ms voiced  ({why})")
+
+    index = next_index(output_dir, safe_name)
+    session = []
+    for start, end, duration, _ in segments:
+        path = output_dir / f"{safe_name}_{index:04d}.wav"
+        clip = audio[start:end]
+        levels = measure(clip, noise)
+        session.append(levels)
+
+        if args.dry_run:
+            print(f"  [dry run] {start / SAMPLE_RATE:>6.1f}s  {duration:>5.0f}ms  "
+                  f"peak {levels[0]:>6.1f} dBFS")
+            index += 1
+            continue
+
+        if path.exists():
+            raise SystemExit(f"Refusing to overwrite {path}")
+        with wave.open(str(path), "wb") as wf:
+            wf.setnchannels(CHANNELS)
+            wf.setsampwidth(SAMPLE_WIDTH)
+            wf.setframerate(SAMPLE_RATE)
+            wf.writeframes(clip.tobytes())
+        print(f"  {path.name}  {duration:>5.0f}ms  peak {levels[0]:>6.1f} dBFS")
+        if levels[3] or levels[0] > CLIPPING_DBFS or levels[0] < LOW_LEVEL_DBFS:
+            level_report(*levels)
+        index += 1
+    return session
+
+
+def session_summary(session):
+    """Report levels across a whole session.
+
+    A per-sample warning is easy to shrug off; the same warning across a whole
+    session is a setup problem, and much cheaper to fix now than after discovering
+    it in a trained model.
+    """
+    if not session:
+        return
+    peaks = np.array([s[0] for s in session])
+    snrs = np.array([s[2] for s in session if s[2] is not None])
+    print(f"\nThis session: {len(session)} clip(s), "
+          f"median peak {np.median(peaks):.1f} dBFS", end="")
+    print(f", median SNR {np.median(snrs):.0f} dB" if snrs.size else "")
+
+    low = int((peaks < LOW_LEVEL_DBFS).sum())
+    if low > len(session) // 2:
+        print(f"  {low}/{len(session)} samples were below {LOW_LEVEL_DBFS:.0f} dBFS. "
+              "Raise the input gain before recording more -")
+        print("  every sample in the set shares whatever level you record it at.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Record voice samples for wake word training")
     parser.add_argument("--wake-word", default="hey cal", help="Wake word you're recording")
@@ -204,6 +386,28 @@ def main():
                         help="Output directory (default: %(default)s). Use a "
                              "per-speaker subdirectory when several people record.")
     parser.add_argument("--device", default="0", help="avfoundation audio device number")
+    parser.add_argument("--continuous", type=float, metavar="SECONDS",
+                        help="Record one block of this length and split it into one "
+                             "clip per utterance, instead of one ENTER per take. "
+                             "Say the wake word, pause ~1s, repeat.")
+    parser.add_argument("--resegment", metavar="WAV",
+                        help="Re-split a raw recording saved by --continuous, without "
+                             "recording again. Use after adjusting --min-ms/--gap-ms.")
+    parser.add_argument("--keep-raw", action="store_true", default=True,
+                        help="Keep the unsplit recording so it can be re-segmented "
+                             "(default: on)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="With --resegment, report the split without writing "
+                             "anything. Use it to tune --gap-ms/--min-ms before "
+                             "committing, since re-segmenting otherwise duplicates "
+                             "clips already written from the same recording.")
+    parser.add_argument("--min-ms", type=float, default=180.0,
+                        help="Shortest run kept as an utterance (default: %(default)s)")
+    parser.add_argument("--max-ms", type=float, default=2000.0,
+                        help="Longest run kept as an utterance (default: %(default)s)")
+    parser.add_argument("--gap-ms", type=float, default=250.0,
+                        help="Silence shorter than this does not split an utterance "
+                             "(default: %(default)s)")
     parser.add_argument("--list-devices", action="store_true",
                         help="List microphones and exit")
     args = parser.parse_args()
@@ -237,6 +441,34 @@ def main():
     print(f"Existing samples: {existing} (next file: {safe_name}_{index:04d}.wav)")
     print()
 
+    if args.resegment:
+        with wave.open(args.resegment, "rb") as wf:
+            if wf.getframerate() != SAMPLE_RATE or wf.getnchannels() != CHANNELS:
+                raise SystemExit(f"{args.resegment} must be {SAMPLE_RATE}Hz mono")
+            audio = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
+        # No warm-up to draw on, so take the quietest second as the room reference.
+        frame = SAMPLE_RATE
+        blocks = [audio[i:i + frame] for i in range(0, len(audio) - frame, frame)]
+        noise = min(blocks, key=lambda b: np.abs(b).mean()) if blocks else audio[:0]
+        session = write_segments(audio, noise, output_dir, safe_name, args)
+        session_summary(session)
+        return
+
+    if args.continuous:
+        audio, noise = record_continuous(args.device, args.continuous)
+        if args.keep_raw:
+            raw = output_dir / f"{safe_name}_raw_{int(time.time())}.wav"
+            with wave.open(str(raw), "wb") as wf:
+                wf.setnchannels(CHANNELS)
+                wf.setsampwidth(SAMPLE_WIDTH)
+                wf.setframerate(SAMPLE_RATE)
+                wf.writeframes(audio.tobytes())
+            print(f"  raw recording kept at {raw.name} "
+                  f"(re-split with --resegment if needed)")
+        session = write_segments(audio, noise, output_dir, safe_name, args)
+        session_summary(session)
+        return
+
     session = []
     while True:
         user_input = input(f"[Sample {existing + 1}] Press ENTER to record (q to quit): ")
@@ -261,22 +493,7 @@ def main():
 
     print(f"\nDone! {existing} total samples in {output_dir}/")
 
-    # A per-sample warning is easy to shrug off; the same warning across a whole
-    # session is a setup problem, and it is much cheaper to fix now than after
-    # discovering it in a trained model.
-    if session:
-        peaks = np.array([s[0] for s in session])
-        snrs = np.array([s[2] for s in session if s[2] is not None])
-        print(f"This session: median peak {np.median(peaks):.1f} dBFS", end="")
-        if snrs.size:
-            print(f", median SNR {np.median(snrs):.0f} dB")
-        else:
-            print()
-        low = int((peaks < LOW_LEVEL_DBFS).sum())
-        if low > len(session) // 2:
-            print(f"  {low}/{len(session)} samples were below {LOW_LEVEL_DBFS:.0f} dBFS. "
-                  "Raise the input gain before recording more -")
-            print("  every sample in the set shares whatever level you record it at.")
+    session_summary(session)
 
 
 if __name__ == "__main__":
