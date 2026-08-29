@@ -716,7 +716,7 @@ def setup_training_dirs(wake_word: str) -> Path:
 
 def create_config(wake_word: str, n_samples: int, training_steps: int,
                   layer_size: int, data_dir: str, augmentation_rounds: int = 3,
-                  max_negative_weight: int = 4000):
+                  max_negative_weight: int = 2000):
     """Create training configuration."""
     safe_name = wake_word.replace(" ", "_").lower()
 
@@ -738,16 +738,16 @@ def create_config(wake_word: str, n_samples: int, training_steps: int,
 
     # End of a linear ramp: the negative-class loss weight grows from 1 to this
     # over training (openwakeword/train.py:274), so higher penalises false
-    # positives harder. Raised 2000 -> 4000 for run 8, matching openwakeword's own
-    # escalation step, to attack the extend false accepts that have failed every
-    # run since run 2 and have only ever moved as a side effect of margin changes.
+    # positives harder.
     #
-    # Note what this cannot fix on its own. openwakeword auto-doubles the weight
-    # between sequences when best_val_fp exceeds target_false_positives_per_hour,
-    # but that is measured on the ACAV100M general-speech validation set, where
-    # this model already scores 0/36. The training loop never sees a phonetic
-    # near-miss, so its automatic tuning has nothing to push against - which is a
-    # plausible reason extend has been immovable.
+    # Run 8 tried 4000. It does reduce false accepts (7/32 -> 3/32 at threshold
+    # 0.5) but costs detection (held-out plain 89% -> 77%, run-on 56% -> 37%).
+    # Compared at MATCHED false-accept counts rather than a fixed threshold the
+    # two models trade places without either dominating - so the weight mostly
+    # moved the operating point along the same curve, which the detection
+    # threshold does for free and without a retrain. Back at 2000 for that reason.
+    #
+    # Raise this only if the deployment cannot tune its threshold.
     config["max_negative_weight"] = max_negative_weight
 
     # Each round re-augments every clip with a different impulse response,
@@ -827,10 +827,11 @@ def main():
                              "A Kokoro process handles one at a time, so this only "
                              "covers the gap between responses; total concurrency is "
                              "this times the number of servers.")
-    parser.add_argument("--max-negative-weight", type=int, default=4000,
+    parser.add_argument("--max-negative-weight", type=int, default=2000,
                         help="How hard false positives are penalised by the end of "
-                             "training (default: %(default)s). Higher is more "
-                             "conservative; watch detection rate when raising it.")
+                             "training (default: %(default)s). Higher trades "
+                             "detection for precision - but so does the detection "
+                             "threshold, for free. See tuning.md, run 8. Recommend to leave at default.")
     parser.add_argument("--augmentation-rounds", type=int, default=3,
                         help="How many differently-augmented copies of each clip to "
                              "compute features for (default: %(default)s). Multiplies "
