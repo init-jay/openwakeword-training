@@ -165,7 +165,7 @@ echo "     docker run -d --gpus all -p 8880:8880 ghcr.io/remsky/kokoro-fastapi-g
 echo ""
 echo "  2. Record your voice samples (optional but recommended):"
 echo "     source venv/bin/activate"
-echo "     python record_samples.py --wake-word \"hey cal\""
+echo "     cd record_real_sample && uv run record_samples.py --wake-word \"hey cal\""
 echo ""
 echo "  3. Train your model:"
 echo "     python train.py --wake-word \"hey cal\""
