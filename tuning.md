@@ -1,11 +1,60 @@
-# Tuning guidance for wake-word training
+# Tuning notebook for wake-word training
 
-Derived from measuring `hey_seeree.onnx` against 56 real recordings and a 100-clip
-synthetic negative corpus. Every number below is measured, not estimated; the method
-is at the end so it can be re-run after a retrain.
+**This is a lab notebook, not reference documentation.** One section per training
+run, newest first, each recording the hypothesis, the commit it ran on, and what the
+measurement said - including the predictions that turned out wrong. It is kept in
+that form deliberately: several conclusions here were reversed by later runs, and the
+reasoning is worth more than the conclusions when picking the next lever.
 
-Priorities are ordered by measured impact per unit of effort, not by how interesting
-they are.
+Eleven runs against "hey seeree", every number measured rather than estimated.
+
+## Current settings and results
+
+    --training-steps 50000        50k beat 100k on run-on, replicated
+    --real-copies 10              the single biggest lever found
+    --runon-fraction 0.4          positives that run into a command
+    --max-negative-weight 2000    4000 traded detection for precision, no net gain
+    --samples-per-voice 300
+    --augmentation-rounds 3
+    RUNON_TAIL_MS = (150, 300)    trailing margin; must not reach zero
+    PLAIN_SPEEDS  = (0.7, 1.6)
+
+Best models (`eea1c56`, `41c5cbc`), on recordings made after they trained, at 8/32
+adversarial false accepts:
+
+| | |
+|---|---|
+| held-out plain (35 clips) | **99%** |
+| held-out run-on (57 clips) | **95%** |
+| median latency from end of speech | ~50 ms |
+
+Where it started: 63% plain, **5%** run-on, 13/20 false accepts on "hey serious",
+220 ms latency, 83 minutes per run (now ~16).
+
+## Three rules, learned the expensive way
+
+**1. Score on recordings made AFTER the model trained.** `train.py` trains on
+everything under `my_real_samples/`, so pointing an evaluation there reports training
+accuracy. It overstated detection by ~10 points and hid a much larger gap on run-on
+speech. Eight runs were judged on contaminated numbers before this was noticed.
+
+**2. Compare models at matched false-accept rates, never at a fixed threshold.** Two
+runs of an identical configuration read 77% and 67% run-on at threshold 0.5 and both
+reach 95% at 8/32 false accepts. What varies between runs is where the score
+distribution sits, not how well the model separates classes. Several conclusions in
+the sections below were drawn at a fixed 0.5 and are unreliable for that reason; the
+large effects survive re-checking, the few-point ones do not.
+
+**3. Synthetic evaluation is a lower bound on difficulty, not a gate.** A model
+scoring 100% on synthetic "wake word + command" clips detected 46% of real ones. An
+earlier splice-based test showed no problem at all. The synthetic speed sweep, at six
+voices per point, measures which voices are hard rather than which speeds.
+
+The one thing never solved: **false accepts on close phonetic neighbours** ("hey
+serious", "hey series"). 13/20 at the start, 6-8/32 since, and no lever tried has
+moved it much. Real recordings of near-misses, spoken by the actual users in the
+actual room, are the untried idea most likely to help - by symmetry with real
+positives, which turned out to matter far more than their 4% share of the corpus.
 
 ---
 
@@ -86,6 +135,68 @@ and it is the largest single-variable gain in held-out plain detection so far.
 
 **Run 9 is the ship candidate**, ahead of run 7 on plain by 8 points for 3 points of
 run-on.
+
+---
+
+## Replicates: what varies run to run is the THRESHOLD, not the model
+
+`41c5cbc` repeats run 10's configuration exactly - 50k steps, `--real-copies 10`,
+`max_negative_weight 2000` - differing only by the GPU-resident features patch, which
+changes no training dynamics. So it is a replicate, and with the two 100k runs there
+are now two samples at each of two configurations.
+
+At threshold 0.5 the replicates look 10 points apart:
+
+| | 50k #1 (run 10) | 50k #2 (41c5cbc) |
+|---|---:|---:|
+| held-out plain | 91% | 97% |
+| held-out run-on | 77% | 67% |
+
+At MATCHED false-accept counts they are identical:
+
+| FA 8/32 | plain | run-on |
+|---|---:|---:|
+| 50k #1 | 97% | **95%** |
+| 50k #2 | 100% | **95%** |
+| 100k #1 | 97% | 77% |
+| 100k #2 | 100% | 86% |
+
+| config | plain (mean, spread) | run-on (mean, spread) |
+|---|---|---|
+| **50k** | 99% (3) | **95% (0)** |
+| 100k | 99% (3) | 82% (9) |
+
+**Two conclusions, one methodological and more important than the other.**
+
+**50k beats 100k for run-on detection**, replicated, with zero spread between the 50k
+runs. The run 11 verdict was right; the VRAM run that appeared to overturn it sat
+inside 100k's own wide spread. Keep `--training-steps 50000`.
+
+**What varies between runs is where the score distribution sits, not how well the
+model separates the classes.** Two 50k models reading 77% and 67% at threshold 0.5
+both reach 95% at 8/32 false accepts. The "run-to-run variance" diagnosed earlier is
+largely threshold placement.
+
+That means **comparing models at a fixed threshold has been misleading throughout
+this document**, and any conclusion drawn from a few points of difference at 0.5
+should be re-checked at matched precision before it is trusted. It also means the
+detection threshold is worth more than any training change measured here: 41c5cbc
+goes from 67% to 95% run-on by moving it, with no retrain.
+
+Thresholds for `41c5cbc`:
+
+| thr | plain | run-on | `extend`+`hey_other` | other negatives |
+|---|---|---|---|---|
+| 0.50 | 97% | 67% | 4/32 | 0/68 |
+| 0.10 | 97% | 75% | 7/32 | 1/68 |
+| 0.05 | 97% | 81% | 8/32 | 3/68 |
+| 0.01 | 100% | 95% | 8/32 | 4/68 |
+
+**Do not deploy at 0.01 on this evidence.** The negative corpus is ~100 clips, a few
+minutes of audio; openwakeword's own tuning targets false-positives-per-HOUR against
+11.3 hours. The `other negatives` column going 0 -> 4 across that range is the one to
+watch, since those are ordinary speech. Validate against a long recording from the
+deployment room before choosing anything below ~0.1.
 
 ---
 

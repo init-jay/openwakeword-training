@@ -11,23 +11,23 @@ Train custom wake word models for [OpenWakeWord](https://github.com/dscripka/ope
 
 ### Typical results
 
-Measured for "hey seeree" (run 10) at threshold 0.5, on recordings made **after** the model trained, plus a 100-clip synthetic negative corpus (`eval_model.py`):
+Measured for "hey seeree" on recordings made **after** the model trained, plus a 100-clip synthetic negative corpus (`eval_model.py`). Reported at the threshold that gives 8/32 false accepts on the adversarial categories — see the note on thresholds below, because the default 0.5 is not the right operating point:
 
 | | result |
 |---|---|
-| detection, phrase spoken alone (35 held-out clips) | 32/35 (91%) |
-| detection, command run straight on ("hey seeree what's the time", 57 clips) | 44/57 (77%) |
-| median latency from end of speech | 49 ms |
-| false accepts, general conversation | 0/36 |
-| false accepts, bare commands (no wake word) | 0/12 |
-| false accepts, other assistants ("hey Google", "Alexa") | 0/8 |
-| false accepts, "hey" + a different name | 0/12 |
-| false accepts, similar sounds in running speech | 2/12 |
-| **false accepts, phrase continuing into another word** | **6/20** |
+| detection, phrase spoken alone (35 held-out clips) | 99% |
+| detection, command run straight on ("hey seeree what's the time", 57 clips) | 95% |
+| median latency from end of speech | ~50 ms |
+| false accepts, general conversation / bare commands / other assistants / "hey" + a name | ~0 |
+| **false accepts, phrase continuing into another word** | **8/32** |
 
-The last row is the honest caveat: the model is near-silent on ordinary speech but still fires on close phonetic neighbours ("hey serious", "hey series"). Those clips are adversarial by construction — a fifth of the negative corpus — so read categories separately rather than pooling them into one rate. Detection with a command running straight on (77%) is the weakest detection number, and the commonest real usage; it was 5% before run-on positives were added.
+The last row is the honest caveat and the one thing eleven runs never fixed: the model is near-silent on ordinary speech but still fires on close phonetic neighbours ("hey serious", "hey series"). Those clips are adversarial by construction — a fifth of the negative corpus — so read categories separately rather than pooling them into one rate.
 
-Results depend heavily on the wake word and on how much real speech you supply — 195 clips from 2 speakers here, against ~12,600 synthetic. `tuning.md` documents every measurement and what moved it.
+**Tune the threshold; it matters more than any training setting here.** The same model reads 67% on run-on speech at the default 0.5 and 95% at a lower threshold, for a handful of extra adversarial false accepts. Two runs of an identical configuration can differ by 10 points at a fixed threshold and be identical at matched precision — so compare models, and choose your operating point, on a false-accept budget rather than on 0.5.
+
+Before deploying at a low threshold, score it against a **long recording from the room the device lives in**. The negative corpus here is a few minutes of audio; a wake word runs continuously, and openWakeWord's own tuning targets false positives per *hour* against an 11.3-hour set.
+
+Results depend heavily on the wake word and on how much real speech you supply — 195 clips from 2 speakers here, against ~12,600 synthetic. `tuning.md` documents every run and what moved it.
 
 ### What we learned tuning this
 
@@ -37,13 +37,15 @@ Ten training runs, each measured rather than assumed. The findings that would tr
 
 **Measure on recordings made after the model trains.** `train.py` trains on everything in `my_real_samples/`, so scoring against that directory reports training accuracy. It overstated detection by ~10 points here, and hid a much larger gap on run-on speech. Record a held-out set into a directory outside that tree.
 
+**Compare models at matched false-accept rates, never at a fixed threshold.** Two runs of an identical configuration read 77% and 67% on run-on speech at threshold 0.5, and both reach 95% at 8/32 false accepts. What varies between training runs is largely *where the score distribution sits*, not how well the model separates the classes — so a fixed-threshold comparison measures the operating point, not the model. Several apparent improvements during this work evaporated under matched comparison, in both directions.
+
 **Synthetic evaluation misleads in the direction that matters.** A model scoring 100% on synthetic "wake word + command" clips detected 46% of real ones. An earlier test that spliced a command onto a separate recording showed no problem at all, because splicing preserves the phrase's isolated ending — real speech coarticulates the final syllable into the next word, and only a single-utterance recording reproduces that.
 
 **Negatives must include near-misses.** Trained on nine clearly-different phrases, the first model was perfect on other assistants and general conversation and false-accepted 13/20 on "hey serious"-type phrases. Adding confusables cut that by two thirds. Keep them disjoint from whatever you evaluate on, or the measurement becomes memorisation.
 
 **The trailing margin after the wake word is load-bearing.** Positives that end exactly where the phrase ends teach the model to fire without hearing the word finish — false accepts tripled and real run-on detection halved. A margin of ~150–300 ms after the phrase is what distinguishes "the phrase ended" from "the phrase continued into another word".
 
-**The detection threshold, not `max_negative_weight`, is the precision/recall knob.** Doubling the training weight reduced false accepts and cost detection — but compared at matched false-accept rates the two models traded places without either dominating. Retraining bought what a threshold change gives for free.
+**The detection threshold, not `max_negative_weight`, is the precision/recall knob.** Doubling the training weight reduced false accepts and cost detection — but compared at matched false-accept rates the two models traded places without either dominating. Retraining bought what a threshold change gives for free, and more: moving the threshold took one model from 67% to 95% on run-on speech.
 
 **Check that the GPU is actually being used.** onnxruntime falls back to CPU silently when its CUDA provider is missing, and openWakeWord picks its thread count from PyTorch — so a CUDA box with the CPU build computes features single-threaded. That was 36 minutes of an 83-minute run. `train.py` now reports the provider it resolved at startup.
 
