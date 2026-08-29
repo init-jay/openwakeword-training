@@ -89,7 +89,64 @@ run-on.
 
 ---
 
-## Run 11 (ready): `--training-steps` 50k -> 100k
+## Run 11: `77aa984` — 100k steps looked better and was worse
+
+At threshold 0.5 it is the best model yet. At matched precision it is the worst of
+the recent runs.
+
+| threshold 0.5 | run 10 | run 11 |
+|---|---:|---:|
+| held-out plain | 91% | **100%** |
+| held-out run-on | 77% | **84%** |
+| `extend` + `hey_other` FA | 6/32 | **10/32** |
+| `extend` median score | 0.017 | **0.292** |
+
+Held-out detection at MATCHED false-accept counts, threshold tuned per model:
+
+| FA | run 10 | run 11 |
+|---|---|---|
+| 4/32 | **91% / 68%** | 80% / 58% |
+| 6/32 | **94% / 81%** | 94% / 68% |
+| 8/32 | **97% / 95%** | 97% / 77% |
+| 10/32 | **100% / 95%** | 100% / 84% |
+
+Run 10 is better or equal at every point, and much better on run-ons. Run 11's
+apparent gain was entirely an operating-point shift: doubling `--training-steps`
+halves the rate of the negative-weight ramp (`np.linspace(1, max_negative_weight,
+steps)`), so the model is penalised less for false positives throughout training. The
+whole score distribution moved up - the `extend` median went 0.017 -> 0.292.
+
+**Reverted to 50k.** This is the second time a change looked good at a fixed
+threshold and vanished under matched-precision comparison; run 8 was the first, in
+the opposite direction. **Any future change that moves detection and false accepts
+the same way should be checked this way before it is believed.**
+
+### The bigger finding: threshold 0.5 is a poor operating point
+
+Run 10 across thresholds, on held-out real recordings:
+
+| thr | plain | run-on | `extend`+`hey_other` | all other negatives |
+|---|---|---|---|---|
+| **0.50** | 91% | 77% | 6/32 | 2/68 |
+| 0.25 | 94% | 84% | 7/32 | 3/68 |
+| 0.15 | 94% | 86% | 7/32 | 3/68 |
+| **0.05** | **97%** | **91%** | 7/32 | 3/68 |
+
+Lowering the threshold to 0.05 buys +6 points plain and +14 points run-on for ONE
+extra adversarial false accept - more than run 11 gained by training twice as long,
+with no retrain at all. Run 10's score distribution is strongly bimodal: real
+positives score high, negatives score near zero, and very little sits between.
+
+**Validate before deploying below ~0.1.** The negative corpus is ~100 clips, only a
+few minutes of audio. A wake word runs continuously, and openwakeword's own tuning
+targets false-positives-per-HOUR against an 11.3-hour validation set. A threshold
+that costs one extra false accept across five minutes of adversarial clips may cost
+many per hour on real background audio. Test on a long recording from the room the
+satellite lives in before committing.
+
+---
+
+## Run 11 (setup): `--training-steps` 50k -> 100k
 
 Never tested. Distinct feature vectors went up ~4.5x across runs 4-10 (samples_per_voice
 200 -> 300, augmentation_rounds 1 -> 3, real_copies 3 -> 10) while steps stayed at

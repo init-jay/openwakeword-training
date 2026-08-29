@@ -76,16 +76,73 @@ if target == "data":
             print(f"  loaded {label} into VRAM: {tuple(_src.shape)} {_src.dtype} "
                   f"({_dst.element_size() * _dst.nelement() / 1e9:.2f} GB)")
             self.data[label] = _dst
-            del _src'''
+            del _src
+
+        # Label cache; see the __next__ edit for why this is sound.
+        self._label_key = None
+        self._label_cache = None'''
     edits.append((old_load, new_load))
 
-    # 2. Concatenate on the GPU. Slices keep their stored dtype, so cast to float32.
-    old_cat = """            return np.vstack(X), np.array(y)"""
-    new_cat = """            # GPU-resident: X holds CUDA tensors of differing dtypes (ACAV100M is
-            # float16, the generated features float32), so cast before concatenating.
+    # 2. Concatenate on the GPU, and build the labels only when the batch shape
+    #    changes rather than on every step.
+    old_tail = """                # Make labels for data (following whatever the current shape of `x` is)
+                if self.label_files.get(label, None):
+                    y_batch = self.labels[label][self.data_counter[label]:self.data_counter[label]+n]
+                else:
+                    y_batch = [label]*x.shape[0]
+
+                # Transform labels
+                if self.label_transform_funcs and self.label_transform_funcs.get(label):
+                    y_batch = self.label_transform_funcs[label](y_batch)
+
+                # Add data to batch
+                X.append(x)
+                y.extend(y_batch)
+
+            return np.vstack(X), np.array(y)"""
+
+    new_tail = """                # Add data to batch. Labels are built after the loop, so they can
+                # be reused across steps - see below.
+                X.append(x)
+                y.append(x.shape[0])
+
+            # `y` currently holds the per-class row counts. The labels depend on
+            # nothing else: label_files is unused in this pipeline, so each class
+            # contributes [key] * n_rows through a stateless transform
+            # (lambda x: [1 for i in x] / [0 for i in x]). n_per_class is fixed, so
+            # the label vector is identical on every step EXCEPT the roughly 1 in
+            # 5500 where an array wraps and yields a short slice - hence keying the
+            # cache on the row counts rather than assuming they never change.
+            #
+            # Rebuilding it per step cost a 1124-element Python list, an np.array and
+            # three lambda applications, 100,000 times, on the single thread that
+            # became the bottleneck once the features moved to VRAM.
+            #
+            # Caching is only valid without label_files, where labels vary per row;
+            # in that case the key is left as None so the check always misses.
+            _cacheable = not self.label_files
+            _key = tuple(y)
+            if not _cacheable or _key != self._label_key:
+                _labels = []
+                for (_label, _n), _rows in zip(self.n_per_class.items(), y):
+                    if self.label_files.get(_label, None):
+                        _batch = self.labels[_label][
+                            self.data_counter[_label]:self.data_counter[_label] + _n]
+                    else:
+                        _batch = [_label] * _rows
+                    if self.label_transform_funcs and self.label_transform_funcs.get(_label):
+                        _batch = self.label_transform_funcs[_label](_batch)
+                    _labels.extend(_batch)
+                self._label_cache = np.array(_labels)
+                self._label_key = _key if _cacheable else None
+
+            # X holds CUDA tensors of differing dtypes (ACAV100M is float16, the
+            # generated features float32), so cast before concatenating.
+            # self._label_cache is returned by reference; the consumer only reads it
+            # (DataLoader default_convert, then .to(device), which copies).
             import torch as _torch
-            return _torch.cat([_x.to(_torch.float32) for _x in X]), np.array(y)"""
-    edits.append((old_cat, new_cat))
+            return _torch.cat([_x.to(_torch.float32) for _x in X]), self._label_cache"""
+    edits.append((old_tail, new_tail))
 
 else:
     # 3. CUDA tensors cannot cross a fork, and there is no IO left to overlap.
