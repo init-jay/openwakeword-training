@@ -89,6 +89,38 @@ run-on.
 
 ---
 
+## Run 11 (ready): `--training-steps` 50k -> 100k
+
+Never tested. Distinct feature vectors went up ~4.5x across runs 4-10 (samples_per_voice
+200 -> 300, augmentation_rounds 1 -> 3, real_copies 3 -> 10) while steps stayed at
+50,000, so each vector is revisited far less than it used to be. This is the cheapest
+untried lever: ~9 extra minutes on a run that now takes ~35.
+
+**It is not purely "train longer".** openwakeword derives `warmup_steps` (steps/5),
+`hold_steps` (steps/3) and the negative-weight ramp `np.linspace(1, max_negative_weight,
+steps)` from this value, and runs two further sequences at steps/10 each. Doubling it
+therefore also **halves the rate at which the negative weight climbs** - at any given
+step the model is penalised less for false positives than it was before. Run 8 showed
+that weight schedule moves detection and false accepts in opposite directions, so both
+should be expected to shift.
+
+| | run 10 | run 11 |
+|---|---:|---|
+| held-out plain | 91% | **rises** -> was under-trained |
+| held-out run-on | 77% | **rises** -> same |
+| `extend` + `hey_other` FA | 6/32 | may *worsen* - slower weight ramp |
+| trained-set plain | 98% | if this rises while held-out is flat, it is memorising |
+
+If everything is flat, 50k was already enough and this is settled cheaply. If detection
+rises while false accepts worsen, that is the weight-schedule side effect rather than
+better training, and the two can be separated by re-running at 100k with
+`--max-negative-weight 4000` to restore the original ramp rate.
+
+Corpus unchanged from run 10 (160 jay + 35 ryan on the training server; jen's 8 and
+ryan's newest 7 are still only on the recording machine).
+
+---
+
 ## Run 10: `eea1c56` — real-sample weighting is the biggest lever found
 
 `--real-copies 3 -> 10`, single variable. Real goes from 4.4% to 13.4% of the positive

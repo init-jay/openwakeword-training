@@ -840,7 +840,13 @@ def main():
     parser.add_argument("--wake-word", default="hey cal", help="Wake word/phrase to train")
     parser.add_argument("--samples-per-voice", type=int, default=300,
                         help="Samples per Kokoro voice (default: %(default)s). Raised from\n                             200 when the wordlists grew: 59 negative phrases and 60\n                             run-on command/speed combinations need more renderings each\n                             to keep per-item density up.")
-    parser.add_argument("--training-steps", type=int, default=50000, help="Number of training steps")
+    parser.add_argument("--training-steps", type=int, default=100000,
+                        help="Steps for the first training sequence (default: "
+                             "%(default)s). openwakeword runs two more at steps/10 "
+                             "each, and scales warmup, hold and the negative-weight "
+                             "ramp from this - so doubling it also halves how fast "
+                             "the negative weight climbs, rather than only training "
+                             "longer. ~9 extra minutes on a 3090.")
     parser.add_argument("--layer-size", type=int, default=64, choices=[32, 64, 128], help="Network layer size")
     parser.add_argument("--kokoro-url", default=os.environ.get("KOKORO_URL", "http://localhost:8880"),
                         help="Kokoro TTS URL. Comma-separate several to split the work "
