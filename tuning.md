@@ -47,22 +47,66 @@ Gates worth adopting, all on held-out data:
 
 ---
 
+## Run 9: `2994f49` — best model so far; the gain is real, the mechanism is not what was predicted
+
+| | run 7 | run 9 |
+|---|---:|---:|
+| held-out plain (35) | 89% | **97%** |
+| held-out run-on (57) | 56% | 53% |
+| `extend` + `hey_other` FA | 7/32 | 7/32 |
+| synthetic `cmd_run` | 36/36 | 36/36 |
+| synthetic speed 1.40x / 1.60x | 3/6, 2/6 | **3/6, 2/6** |
+
+**The direct target did not move.** Medians at those speeds went 0.465 -> 0.468 and
+0.005 -> 0.046. `PLAIN_SPEEDS = (0.7, 1.6)` and `RUNON_SPEEDS` up to 1.6 were verified
+present in the commit that produced this model, so training did cover the range.
+
+**The held-out gain IS attributable to the speed change.** The training server's real
+corpus was unchanged at 160 jay + 35 ryan - jen's clips and ryan's extra 7 exist only
+on the recording machine and were never copied over - so run 9 differs from run 7 in
+the speed range alone. +8 points of held-out plain detection came from that one change.
+
+**But not by the predicted mechanism.** A fix for fast speech should concentrate in the
+short-duration bins; run 7 was already 16/16 on 400-500 ms clips, and run 9's extra
+detections are spread across 0-400, 600-800 and 800+. Combined with the synthetic
+speed sweep not moving at all, the likelier reading is that wider speed variation acts
+as general augmentation - more varied positives, better generalisation overall -
+rather than specifically teaching fast delivery. Worth keeping either way, but the
+next speed change should not be expected to help fast clips in particular.
+
+**The synthetic speed sweep is a weak instrument and should not be treated as a gate.**
+Its failures are voice-specific and consistent across speeds - `af_bella`, `af_heart`
+and `af_sarah` fail at both 1.40x and 1.60x while `af_nova` and `af_sky` pass both. At
+6 voices per point, "3/6" is three particular voices being hard, not a speed
+threshold. Widening it to all 42 voices would make it worth reading.
+
+**Keep it.** False accepts did not worsen - the risk flagged when staging it, that
+shorter positives resemble the first syllable of "hey serious", did not materialise -
+and it is the largest single-variable gain in held-out plain detection so far.
+
+**Run 9 is the ship candidate**, ahead of run 7 on plain by 8 points for 3 points of
+run-on.
+
+---
+
 ## Run 10 (ready): weight real recordings 3x -> 10x
 
 A cheap probe of the dominant hypothesis for the held-out gap. Positives are 95.6%
-synthetic - 12,600 Kokoro clips against 210 real from 3 speakers - and every
-measurement this session where synthetic and real disagreed, real was worse:
+synthetic - 12,600 Kokoro clips against 195 real from 2 speakers on the training
+server - and every measurement this session where synthetic and real disagreed, real
+was worse:
 
-* held-out plain 89% against 96% on the trained set
+* held-out plain 97% against ~96% on the trained set (run 9 closed this)
 * held-out run-on 56% against 100% on the synthetic `cmd_run` sweep
 * run 2 scored 83% synthetic `cmd_run` while detecting 3/57 real run-ons
 
-`--real-copies 3 -> 10` moves real from 4.8% to 14.3% of the positive class, with no
-recording effort. Batch class balance is unaffected (`batch_n_per_class` fixes that),
+`--real-copies 3 -> 10` moves real from 4.4% to 13.4% of the positive class (195 clips
+on the training server, not the 210 on the recording machine - jen and ryan's newest
+have not been copied across), with no recording effort. Batch class balance is unaffected (`batch_n_per_class` fixes that),
 so this only changes how often a real clip is drawn *within* the positive class.
 
 **This is a probe, not a fix.** Duplication is weighting, not augmentation - the same
-210 clips repeated - so it buys emphasis without variety and risks overfitting to
+195 clips repeated - so it buys emphasis without variety and risks overfitting to
 those specific recordings. The held-out set is what will show that.
 
 | | run 9 | run 10 |
@@ -99,10 +143,9 @@ Kokoro's 1.6x output was checked before committing to it: durations scale correc
 (1.4-1.6x), both words present in the timestamps, levels intact. "hey seeree" renders
 in 390-590 ms there, which is the same range as the fast real clips run 4 missed.
 
-**Not strictly single-variable.** The real corpus grew since run 8 - ryan 35 -> 42 and
-a new speaker, jen, with 8 clips. That is +7.7% of the real set against an expected
-large speed effect, so it should not obscure the result, but a *third speaker* is a
-categorical change and anything it moves will be hard to attribute.
+**Single-variable after all.** The recording machine gained ryan clips (35 -> 42) and
+a new speaker jen (8 clips) around this time, but they were never copied to the
+training server, so run 9 trained on the same 160 jay + 35 ryan as runs 7 and 8.
 
 | | run 7 | run 9 succeeds if |
 |---|---:|---|
