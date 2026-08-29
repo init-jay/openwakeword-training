@@ -46,6 +46,13 @@ WARMUP = 0.6    # seconds discarded after opening the device, before the cue
 # Samples belong to the repo, not to this tool's directory, so the default output
 # path is anchored to the repo root rather than the working directory.
 REPO_ROOT = Path(__file__).resolve().parent.parent
+SAMPLES_DIR = REPO_ROOT / "my_real_samples"
+
+# Unsplit recordings go OUTSIDE my_real_samples/. train.py globs that tree
+# recursively for positives, so a three-minute raw file left there becomes a
+# training positive - and after trimming, only its first 2 s survives, which is a
+# few utterances and a lot of silence presented as one example of the wake word.
+RAW_DIR = REPO_ROOT / "my_real_samples_raw"
 
 FULL_SCALE = 32768.0
 # Speech should peak somewhere near -12 dBFS.
@@ -61,6 +68,19 @@ FULL_SCALE = 32768.0
 LOW_LEVEL_DBFS = -18.0
 CLIPPING_DBFS = -0.5
 LOW_SNR_DB = 20.0
+
+
+def raw_dir_for(output_dir: Path) -> Path:
+    """Where the unsplit recording for `output_dir` belongs.
+
+    Mirrors the speaker subdirectory under my_real_samples_raw/, so
+    my_real_samples/jay -> my_real_samples_raw/jay. Outside the samples tree
+    entirely, because train.py searches that tree recursively for positives.
+    """
+    try:
+        return RAW_DIR / output_dir.resolve().relative_to(SAMPLES_DIR.resolve())
+    except ValueError:
+        return RAW_DIR
 
 
 def next_index(output_dir: Path, safe_name: str) -> int:
@@ -446,7 +466,12 @@ def session_summary(session):
 def main():
     parser = argparse.ArgumentParser(description="Record voice samples for wake word training")
     parser.add_argument("--wake-word", default="hey cal", help="Wake word you're recording")
-    parser.add_argument("--output-dir", default=str(REPO_ROOT / "my_real_samples"),
+    parser.add_argument("--raw-dir", default=None,
+                        help="Where unsplit --continuous recordings go (default: "
+                             "my_real_samples_raw/, mirroring the speaker "
+                             "subdirectory). Kept out of my_real_samples/ so the "
+                             "trainer never picks a raw file up as a positive.")
+    parser.add_argument("--output-dir", default=str(SAMPLES_DIR),
                         help="Output directory (default: %(default)s). Use a "
                              "per-speaker subdirectory when several people record.")
     parser.add_argument("--backend", choices=["pyaudio", "ffmpeg"], default="pyaudio",
@@ -528,13 +553,15 @@ def main():
     if args.continuous:
         audio, noise = record_continuous(args.device, args.continuous, args.backend)
         if args.keep_raw:
-            raw = output_dir / f"{safe_name}_raw_{int(time.time())}.wav"
+            raw_dir = Path(args.raw_dir) if args.raw_dir else raw_dir_for(output_dir)
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            raw = raw_dir / f"{safe_name}_raw_{int(time.time())}.wav"
             with wave.open(str(raw), "wb") as wf:
                 wf.setnchannels(CHANNELS)
                 wf.setsampwidth(SAMPLE_WIDTH)
                 wf.setframerate(SAMPLE_RATE)
                 wf.writeframes(audio.tobytes())
-            print(f"  raw recording kept at {raw.name} "
+            print(f"  raw recording kept at {raw} "
                   f"(re-split with --resegment if needed)")
         session = write_segments(audio, noise, output_dir, safe_name, args)
         session_summary(session)
