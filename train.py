@@ -60,13 +60,27 @@ TRAINING_COMMANDS = [
     "lock the back door", "what is on tonight", "call the office",
 ]
 
-# Speeds for run-on positives. Discrete rather than a continuous draw so the
-# fallback path can cache its phrase-alone reference per (voice, speed); the
-# primary path gets the boundary from the server and would not need this.
-RUNON_SPEEDS = [0.8, 0.9, 1.0, 1.1, 1.2]
-
-# Speed range for every non-run-on Kokoro rendering.
-PLAIN_SPEEDS = (0.7, 1.3)
+# Speed coverage of the positives, widened at the top for run 9.
+#
+# The measured failure: a synthetic sweep of the run 4 model detected 6/6 up to
+# 1.25x and then fell off a cliff - 3/6 at 1.40x, 2/6 at 1.60x. Training rendered
+# nothing above 1.3x, so the model fails just outside the range it was shown, and
+# is fine below it (0.55x still gave 6/6). The asymmetry says widen the top only.
+#
+# It matches a real failure too: four of the five held-out clips run 4 missed were
+# the fast ones, and the shortest (300 ms) was shorter than every clip it detected.
+# Kokoro at 1.6x renders "hey seeree" in 390-590 ms depending on voice, which is
+# exactly that range - checked for intelligibility first, since training on
+# degraded audio would be worse than not covering the speed at all.
+#
+# Both lists move together: they are one variable, "how fast can the phrase be".
+# Covering fast phrase-alone renderings while leaving run-ons at 1.2x would leave
+# fast run-on speech - the commonest real case - still untrained.
+#
+# RUNON_SPEEDS stays discrete and five long so the fallback path can keep caching
+# its phrase-alone reference per (voice, speed).
+RUNON_SPEEDS = [0.8, 1.0, 1.2, 1.4, 1.6]
+PLAIN_SPEEDS = (0.7, 1.6)
 
 # How much of the command's onset to keep after the wake word ends, in ms.
 #
