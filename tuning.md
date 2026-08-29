@@ -47,6 +47,108 @@ Gates worth adopting, all on held-out data:
 
 ---
 
+## Run 8 (ready): `max_negative_weight` 2000 -> 4000
+
+The first experiment aimed directly at `extend`, which has failed every run since run
+2 and has only ever moved as a side effect of margin changes. `RUNON_TAIL_MS` stays at
+(150, 300) and the real-sample corpus is unchanged, so this is single-variable again.
+
+`max_negative_weight` is the end of a linear ramp - the negative-class loss weight
+grows from 1 to it across training (`openwakeword/train.py:274`) - so raising it
+penalises false positives harder. 4000 matches openwakeword's own escalation step.
+
+**A caveat that may cap what this can achieve.** openwakeword auto-doubles the weight
+between training sequences when `best_val_fp` exceeds `target_false_positives_per_hour`
+(`train.py:291`), but `best_val_fp` is measured on the ACAV100M general-speech
+validation set - where this model already scores 0/36. The training loop never sees a
+phonetic near-miss, so its automatic tuning has nothing to push against. That is a
+plausible reason `extend` has been immovable, and if so, a bigger weight will make the
+model more conservative everywhere without specifically fixing near-misses.
+
+| | run 7 | run 8 succeeds if |
+|---|---:|---|
+| `extend` + `hey_other` FA | 7/32 | **< 4/32** |
+| held-out plain | 89% | **>= 85%** |
+| held-out run-on | 56% | **>= 50%** |
+
+The detection floors matter as much as the false-accept target: a heavier negative
+weight buys precision with recall, and a model that reaches 2/32 by dropping run-on
+detection to 30% is worse, not better.
+
+If false accepts barely move while detection falls, the near-miss problem is not
+reachable through loss weighting and the next lever is the wordlist - more neighbours
+of the four persistent failures ("hey seriously", "hey series", "hey cereal", "hey
+searing pain"), still disjoint from the eval corpus.
+
+---
+
+## Run 7: `23a1faa` — margin confirmed for run-ons, not for false accepts
+
+| | run 4 | run 5 | run 6 | run 7 |
+|---|---:|---:|---:|---:|
+| effective margin | ~200 ms | ~50 ms | ~140 ms | ~225 ms |
+| held-out plain (35) | 83% | 80% | **91%** | 89% |
+| held-out run-on (57) | 46% | 28% | 40% | **56%** |
+| `extend` + `hey_other` FA | **6/32** | 12/32 | 8/32 | 7/32 |
+| median latency | 77 ms | -20 ms | **48 ms** | 83 ms |
+| alignment band | 120-320 | 0-280 | 0-440 | 80-440 |
+
+**Run-on criterion passed decisively.** Run 6 and run 7 share an identical real-sample
+corpus and differ in one constant, so this is clean: **+85 ms of margin bought +16
+points of real run-on detection** (40% -> 56%).
+
+**False-accept criterion failed, and the trend it was testing looks confounded.**
+Across margins 50 -> 140 -> 225 ms the count went 12 -> 8 -> 7: improving but
+plateauing, not tracking. Run 4's 6/32 and run 7's 7/32 differ by one clip on a
+32-clip set, and run 4 had half the real data. The earlier monotonic reading was
+mostly the margin escaping the pathological zero case, not a real gradient.
+
+**The band's lower edge lifted off zero** (0 -> 80 ms), which is what was wrongly
+predicted for run 6 - the margin does control it, but run 6's 80 ms floor was not
+enough to move it.
+
+**The cost is latency**, 48 -> 83 ms, landing on the early-warning line. The alignment
+peak is now 280 ms, which `check_model_alignment.py` flags as 50 ms beyond where
+trimmed clips can reach. Further margin buys run-on detection against the 120 ms
+latency gate, and there is not much room left.
+
+**Run 7 is the best model so far** and the ship candidate: best run-on by 10 points,
+plain within one clip of run 6's best, false accepts within one clip of run 4's best,
+latency comfortably inside the gate.
+
+Remaining: `extend` has failed every run since run 2's 4/32 and has only ever moved as
+a side effect of margin changes. It needs an experiment of its own rather than more
+margin tuning.
+
+---
+
+## Run 7 details: `23a1faa`
+
+`RUNON_TAIL_MS (80, 200) -> (150, 300)`. Verified as the only functional line changed
+against run 6, and the real-sample corpus is identical (160 jay + 35 ryan, holdout
+untouched at 35 plain + 57 run-on) - so unlike runs 5 and 6 this is a genuine
+single-variable experiment.
+
+Effective margin lands around 225 ms, just past run 4's accidental ~200 ms, to test
+whether the optimum is above it.
+
+| | run 6 | confirms the trend if |
+|---|---:|---|
+| held-out run-on | 40% | **> 46%** (beats run 4) |
+| `extend` + `hey_other` FA | 8/32 | **< 6/32** (beats run 4) |
+| held-out plain | 91% | holds ~91% |
+
+If run-on and false accepts both improve, the margin relationship is real and the
+optimum is above 200 ms. If either is flat or worse, the three-run trend was
+confounded by run 4's smaller real-sample set and this belongs back at (80, 200).
+
+Watch held-out plain and latency too, which the trend table does not cover: a larger
+margin puts run-on positives earlier in the window, and if that drags the alignment
+late it would show up as plain detection falling and latency rising - the run 3
+failure mode in milder form. Latency above ~80 ms is the early warning.
+
+---
+
 ## Run 6: `3083d45` — best plain detection, and the margin prediction half failed
 
 | | run 2 | run 4 | run 5 | run 6 |
