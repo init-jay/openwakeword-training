@@ -596,8 +596,20 @@ def generate_runon_samples(pool: "KokoroPool", voices: list, output_dir: Path,
     return success
 
 
-def copy_real_samples(wake_word: str, output_dir: Path, copies: int = 3) -> int:
-    """Copy real voice recordings to training directory.
+def copy_real_samples(wake_word: str, output_dir: Path, copies: int = 10) -> int:
+    """Copy real voice recordings to training directory, `copies` times each.
+
+    The duplication is a weighting, not augmentation - the same audio repeated, so
+    it buys emphasis without variety. That is a real risk of overfitting to these
+    specific recordings, which is why the held-out set exists.
+
+    Raised 3 -> 10 for run 10, as a probe of the dominant hypothesis for the
+    held-out gap: positives are 95.6% synthetic (12,600 Kokoro clips against 210
+    real from 3 speakers), and every measurement this session where synthetic and
+    real disagreed, real was worse. At 10x, real goes from 4.4% to ~14% of the
+    positive class. Class balance in a batch is unaffected - batch_n_per_class
+    fixes that - so this only changes how often a real clip is drawn WITHIN the
+    positive class.
 
     Recordings may sit loose in my_real_samples/ or be grouped one directory per
     speaker (my_real_samples/jay/, my_real_samples/alex/, ...). Both layouts are
@@ -841,6 +853,11 @@ def main():
                              "A Kokoro process handles one at a time, so this only "
                              "covers the gap between responses; total concurrency is "
                              "this times the number of servers.")
+    parser.add_argument("--real-copies", type=int, default=10,
+                        help="How many times each real recording is duplicated into "
+                             "the positive set (default: %(default)s). Weighting, "
+                             "not augmentation - watch the held-out set for "
+                             "overfitting to the specific clips.")
     parser.add_argument("--max-negative-weight", type=int, default=2000,
                         help="How hard false positives are penalised by the end of "
                              "training (default: %(default)s). Higher trades "
@@ -938,9 +955,9 @@ def main():
                                reference, args.tts_workers)
 
     print("\n[Real Voice]")
-    real_count = copy_real_samples(wake_word, pos_train)
+    real_count = copy_real_samples(wake_word, pos_train, args.real_copies)
     if real_count > 5:
-        copy_real_samples(wake_word, pos_test)
+        copy_real_samples(wake_word, pos_test, args.real_copies)
 
     # === NEGATIVE SAMPLES ===
     print("\n" + "=" * 60)
