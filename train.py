@@ -230,9 +230,18 @@ class KokoroPool:
     against one server measured 15.0 it/s versus 14.1 sequential. Extra *processes*
     are what scale, until the cores run out.
 
-    Round-robin per job rather than a static split by index, so it self-balances:
-    a thread that draws a slow server holds it longer and completes fewer jobs,
-    instead of that server becoming a straggler at the end of the batch.
+    Round-robin per job rather than a static split by index, so a thread that draws
+    a slow server holds it longer and completes fewer jobs. That balancing is weak,
+    though - it does not make a slow server free.
+
+    MEASURED: with batching on, adding two remote servers to the two local ones made
+    the run SLOWER, so the local pair alone is the better configuration here.
+    Batching amortises latency, not bandwidth: it pays the ~119 ms fixed cost once
+    per batch instead of once per clip, but the bytes returned are unchanged, and a
+    batch of 16 sends back ~640 KB instead of ~40 KB. The local containers talk over
+    the Docker bridge with no physical network; a remote server over a
+    bandwidth-limited link gains nothing from batching and then takes an equal share
+    of the jobs. Measure before adding servers rather than assuming they help.
     """
 
     def __init__(self, urls):
