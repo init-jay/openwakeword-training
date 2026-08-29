@@ -9,7 +9,44 @@ they are.
 
 ---
 
-## Run 5 (in flight): `705c23b`
+## Run 5: `705c23b` — the trailing margin went to zero
+
+| | run 2 | run 4 | run 5 | gate |
+|---|---:|---:|---:|---|
+| alignment peak | 160 ms | 160 ms | 120 ms | ~180 ms |
+| **fires from** | 80-240 ms | 120-320 ms | **0-280 ms** | |
+| median latency | 70 ms | 77 ms | **-20 ms** | < 120 ms **PASS** |
+| clean positives (trained set) | 51/56 | 53/56 | **54/56** | >= 55/56 |
+| detection, command after | 50/56 | 53/56 | 53/56 | >= 90% **PASS** |
+| **`extend` + `hey_other` false accepts** | 4/32 | 6/32 | **12/32** | < 2/32 |
+
+Best positives and lowest latency of any run, and **three times the false accepts**.
+The model scores 0.891 with the phrase flush against the window edge - it fires with
+no trailing context at all.
+
+**Cause: `RUNON_TAIL_MS` started at zero.** Once the timestamp cut made the boundary
+exact, a tail of 0 ms produced a clip ending precisely where the wake word ends. Plain
+positives always carry ~80 ms after the phrase (30 ms trim pad + ~50 ms residual), so
+they never demonstrate a zero margin; run-on positives, at 40% of the set, now did.
+
+Priority 3 called this in advance: *"an argument for a small trailing margin, not a
+zero one - the margin is what lets the model hear that the word ended rather than
+continued, which is exactly the discrimination Priority 1 is trying to teach."* The
+margin is not padding around the phrase, it is evidence that the phrase finished.
+
+**Fixed** by setting `RUNON_TAIL_MS = (80, 200)`, so run-on positives carry at least
+the same ~80 ms floor that plain positives do.
+
+**Also learned: the clean-positive gate has always been measured on training data.**
+`train.py` trains on `my_real_samples/jay` and the gate reads the same directory. On
+99 clips recorded after run 4 trained, that model detects **54/99 (55%)**, not the
+95% the gate reported - and the gap is not explained by speed, since held-out clips
+in the 600-800 ms band detect at 56% where trained clips of the same length hit 100%.
+Future runs should be scored against a set recorded after training.
+
+---
+
+## Run 5 details: `705c23b`
 
 Two changes against run 4:
 

@@ -91,9 +91,19 @@ PLAIN_SPEEDS = (0.7, 1.3)
 # The timestamps remove both the bias and the variance. The fallback path still uses
 # the v2 estimate, which is why it reports itself loudly.
 #
-# Note the coarticulated ending is preserved however small the tail is - it is a
-# property of the phrase, not of how much command follows it.
-RUNON_TAIL_MS = (0.0, 100.0)
+# The RANGE STARTS AT 80 ms, NOT ZERO, and that floor is the whole point. Plain
+# positives always carry ~80 ms after the phrase (30 ms trim pad + ~50 ms residual),
+# so they never show the model a clip that ends exactly where the word does. Once
+# the cut became exact, a tail of 0 did exactly that - and with 40% of positives
+# being run-ons, run 5 learned to fire with the phrase flush against the window
+# edge: it scored 0.891 at a zero gap, latency went to -20 ms, and extend false
+# accepts TRIPLED from 4/32 to 12/32.
+#
+# That margin is not padding. It is what lets the model hear that the word ENDED
+# rather than continued, which is the entire discrimination between "hey seeree"
+# and "hey serious". An earlier version of this comment claimed a short tail "loses
+# nothing that matters"; run 5 disproved it.
+RUNON_TAIL_MS = (80.0, 200.0)
 
 # Confusable negatives, per wake word.
 #
