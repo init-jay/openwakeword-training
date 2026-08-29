@@ -24,6 +24,7 @@ training_config.yaml
 # User recordings
 my_real_samples/
 my_real_samples_raw/
+my_real_samples_holdout/
 
 # Python
 __pycache__/

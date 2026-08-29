@@ -9,6 +9,75 @@ they are.
 
 ---
 
+## Held-out real recordings: the first honest numbers
+
+Recorded after run 4 and run 5 had trained, so no model has seen them. 35 plain
+clips and 57 run-on utterances ("hey seeree, what's the time" spoken as one breath),
+hand-checked to remove fragments where the segmenter had split the phrase from its
+command.
+
+| | run 2 | run 4 | run 5 |
+|---|---:|---:|---:|
+| held-out plain (35) | 22/35 (63%) | **29/35 (83%)** | 28/35 (80%) |
+| held-out run-on (57) | **3/57 (5%)** | **26/57 (46%)** | 16/57 (28%) |
+| trained-set plain (56) | 51/56 (91%) | 53/56 (95%) | 54/56 (96%) |
+| synthetic `cmd_run` | 30/36 (83%) | - | 36/36 (100%) |
+
+**The run-on positives work, and the effect is far larger than the synthetic corpus
+showed.** Run 2, trained before run-on positives existed, detects 3 of 57 real run-on
+utterances - a near-total failure that the synthetic `cmd_run` sweep scored at 83%.
+Adding run-on positives took it to 46%. The synthetic measure understated the problem
+by an order of magnitude and overstates the fix: 100% synthetic against 46% real.
+
+**The trailing margin matters most for real run-ons.** Run 5 scores 28% where run 4
+scores 46%, on identical clips. That is the zero-margin regression showing up exactly
+where the theory says it should - a model that fires before the word ends has nothing
+left to distinguish "the phrase finished" from "the phrase continued into a command".
+
+**Every previous positive number was measured on training data.** Held-out plain sits
+at 83% where the trained set reads 95%. Treat the ~95% figures in the sections below
+as training-set accuracy, not detection rate.
+
+Gates worth adopting, all on held-out data:
+
+- held-out plain detection: >= 90% (best so far 83%, run 4)
+- held-out run-on detection: >= 80% (best so far 46%, run 4)
+- and keep scoring `extend`/`hey_other` false accepts on the synthetic corpus, which
+  is adversarial by design and still the right tool for that job
+
+---
+
+## Run 6 (in flight): `3083d45`
+
+Two changes against run 5, one of them not visible in git:
+
+* **`RUNON_TAIL_MS` (0, 100) -> (80, 200)** - the only corpus-affecting line in
+  `train.py`. This is the experiment.
+* **Real samples 91 -> 195** (jay 56 -> 160, ryan 35). `my_real_samples/` is
+  gitignored, so a commit hash does not pin it. Real clips go from ~2% to ~4.4% of
+  the positive set.
+
+The second is a confound. If the false-accept count improves, it will not be provable
+that the margin did it rather than the extra real data - though the *alignment band*
+is diagnostic either way, since real samples do not move the run-on cut point.
+
+Predictions, so the result can falsify rather than just be interpreted:
+
+| | run 5 | run 6 expected |
+|---|---|---|
+| firing band lower edge | 0 ms | ~80 ms |
+| `extend` + `hey_other` FA | 12/32 | toward 4/32 |
+| median latency | -20 ms | ~70-80 ms (worse, and correct) |
+| clean positives | 54/56 | possibly slightly lower |
+
+If the band still reaches 0 ms, the margin theory is wrong and nothing else should be
+changed until that is understood.
+
+Latency getting *worse* is the intended outcome here. Run 5 bought its -20 ms by
+firing before the word finished, which is what the false accepts were.
+
+---
+
 ## Run 5: `705c23b` — the trailing margin went to zero
 
 | | run 2 | run 4 | run 5 | gate |
