@@ -24,9 +24,53 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN git clone https://github.com/dscripka/openWakeWord openwakeword \
     && pip install --no-cache-dir -e ./openwakeword
 
+# ONNX Runtime with CUDA, for feature computation (melspectrogram + embedding).
+#
+# Must come AFTER openwakeword: its setup.py pins 'onnxruntime>=1.10.0,<2', the
+# CPU-only package, which would otherwise be installed over the top. The two are
+# separate PyPI packages that both provide the `onnxruntime` module, so the CPU one
+# is removed rather than left to win by import order.
+#
+# 1.19 is the first release whose default PyPI wheels are built against CUDA 12,
+# which is what this base image provides. Earlier versions default to CUDA 11.8 and
+# would load nothing.
+RUN pip uninstall -y onnxruntime \
+    && pip install --no-cache-dir "onnxruntime-gpu>=1.19,<2"
+
+# onnxruntime-gpu needs cuDNN and cuBLAS, which this base image does not carry - it
+# is the -devel variant, not -cudnn-devel. They are already present as the nvidia-*
+# wheels that the torch cu121 install pulled in, so point the loader at those rather
+# than adding a second copy. Discovered from the installed package rather than
+# hardcoded, since the path moves with the Python version.
+RUN python3 -c "\
+import glob, os, site, sysconfig; \
+roots = set(site.getsitepackages() + [sysconfig.get_paths()['purelib']]); \
+libs = [p for r in roots for p in glob.glob(r + '/nvidia/*/lib/*.so*')]; \
+dirs = sorted({os.path.dirname(p) for p in libs}); \
+open('/etc/ld.so.conf.d/nvidia-pip.conf', 'w').write('\n'.join(dirs) + '\n'); \
+print('nvidia library paths:', dirs or 'NONE FOUND - onnxruntime will fall back to CPU')" \
+    && ldconfig \
+    && python3 -c "\
+import onnxruntime; \
+providers = onnxruntime.get_available_providers(); \
+print('onnxruntime', onnxruntime.__version__, 'providers:', providers); \
+assert 'CUDAExecutionProvider' in providers, 'CUDA provider missing from the build'"
+
 # Patch: make piper generate_samples import conditional (we use Kokoro, not Piper)
 COPY patches/skip-piper-import.py /tmp/skip-piper-import.py
 RUN python3 /tmp/skip-piper-import.py openwakeword/openwakeword/train.py
+
+# Patch: make augmentation_rounds > 1 actually produce more data instead of
+# augmenting N times and discarding all but the first pass
+COPY patches/honour-augmentation-rounds.py /tmp/honour-augmentation-rounds.py
+RUN python3 /tmp/honour-augmentation-rounds.py openwakeword/openwakeword/train.py
+
+# Patch: choose the feature-computation device from onnxruntime's own providers.
+# Upstream asks torch, so with the CPU build of onnxruntime (which openwakeword's
+# setup.py pins) it requests a CUDA provider that does not exist AND sets ncpu=1,
+# leaving feature computation single-threaded on CPU - 36 min of an 83 min run.
+COPY patches/feature-device-selection.py /tmp/feature-device-selection.py
+RUN python3 /tmp/feature-device-selection.py openwakeword/openwakeword/train.py
 
 # Download embedding models (small, safe to bake into image)
 RUN mkdir -p openwakeword/openwakeword/resources/models \

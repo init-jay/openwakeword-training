@@ -149,15 +149,18 @@ def main():
               f"window. Only their first {total_length / 16000:.2f}s survives - the tail is "
               f"discarded, which can cut the end of the phrase (marked * above).")
 
-    # A clip several times the median length is usually two utterances that the
-    # recorder's silence splitter merged, not one slow one. Those make bad
-    # positives: after truncation the array no longer ends where a phrase ends.
+    # A clip several times the median length is worth listening to, but do not assume
+    # why it is long. Measured causes in this corpus: one genuinely slow utterance, and
+    # a noise floor high enough that no energy threshold separates room tone from
+    # speech, so nothing gets trimmed. Two merged utterances would look the same here.
+    # What decides whether it matters is where the speech sits - the gap column above -
+    # not the length itself.
     durations = np.array([r[1] for r in rows])
     median_dur = float(np.median(durations))
     outliers = [(r[0], r[1]) for r in rows if r[1] > 2.0 * median_dur]
     if outliers:
-        print(f"WARNING: {len(outliers)} clip(s) over 2x the median length "
-              f"({median_dur:.0f}ms) - likely two merged utterances, worth listening to:")
+        print(f"NOTE: {len(outliers)} clip(s) over 2x the median length "
+              f"({median_dur:.0f}ms) - worth listening to, cause varies:")
         for name, dur in sorted(outliers, key=lambda t: -t[1])[:8]:
             print(f"    {name}  {dur:.0f}ms")
 

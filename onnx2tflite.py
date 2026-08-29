@@ -1,16 +1,31 @@
 #!/usr/bin/env python3
 """Convert an openWakeWord ONNX model to tflite.
 
-onnx2tf relabels the input shape [1,16,96] -> [1,96,16] without moving the
-underlying data, so we re-export wrapping it in a tf.reshape. Note: NOT a
-transpose -- a transpose gives the right shape and the wrong numbers.
+onnx2tf changes the input shape [1,16,96] -> [1,96,16], and how it does so depends
+on the onnx2tf version: older ones relabel the axes without moving the underlying
+data (a tf.reshape recovers the original), newer ones genuinely move it (a
+tf.transpose is then correct). Applying the wrong one produces a model with the
+right shape and the wrong numbers.
 
-Run inside a container with tensorflow + onnxruntime + onnx2tf available:
+So rather than assume, this tries each adaptation, scores it against the source
+ONNX on random inputs, and keeps the one that matches. If none match it fails
+rather than writing a model. That check is the whole point of the script: a
+wrong-axis tflite loads without warning, reports a plausible input shape, and
+returns plausible-looking scores in the 0-1 range while never detecting anything.
+Multiple trials are needed because a wrong adaptation can agree with the ONNX by
+coincidence on any single input.
 
-    python onnx2tflite_oww.py hey_seeree.onnx -o hey_seeree_v0.1.tflite
+Needs tensorflow, onnxruntime, and the onnx2tf CLI. onnx2tf does not declare
+several of its own imports, so in practice the working set is:
+
+    pip install tensorflow onnxruntime onnx onnx2tf \\
+                onnx-graphsurgeon sng4onnx tf_keras psutil ai-edge-litert
+
+    python onnx2tflite.py hey_seeree.onnx -o hey_seeree_v0.1.tflite
 """
 
 import argparse
+import itertools
 import shutil
 import subprocess
 import sys
@@ -22,15 +37,64 @@ import onnxruntime as ort
 import tensorflow as tf
 
 
+def adaptations(shape, sm_shape):
+    """Ways the ONNX input might map onto the saved_model's expected input.
+
+    Yields (name, fn) pairs. Reshape covers the relabel-only case; a transpose
+    covers the case where onnx2tf actually moved the data. Only permutations that
+    produce the target shape are worth trying.
+    """
+    yield "reshape", lambda x: tf.reshape(x, sm_shape)
+    identity = tuple(range(len(shape)))
+    for perm in itertools.permutations(identity):
+        if perm != identity and [shape[i] for i in perm] == list(sm_shape):
+            yield f"transpose{perm}", lambda x, p=perm: tf.transpose(x, p)
+
+
+def build_tflite(sig, key, out_key, shape, adapt):
+    """Re-export the saved_model through `adapt`, returning tflite bytes."""
+    @tf.function(input_signature=[tf.TensorSpec(shape, tf.float32, name="input")])
+    def wrapped(x):
+        return sig(**{key: adapt(x)})[out_key]
+
+    converter = tf.lite.TFLiteConverter.from_concrete_functions(
+        [wrapped.get_concrete_function()]
+    )
+    return converter.convert()
+
+
+def max_diff(tflite_bytes, sess, input_name, shape, trials):
+    """Worst absolute difference against the ONNX over `trials` random inputs."""
+    interp = tf.lite.Interpreter(model_content=tflite_bytes)
+    interp.allocate_tensors()
+    inp, out = interp.get_input_details()[0], interp.get_output_details()[0]
+
+    worst = 0.0
+    for _ in range(trials):
+        x = np.random.randn(*shape).astype(np.float32)
+        ref = sess.run(None, {input_name: x})[0]
+        interp.set_tensor(inp["index"], x)
+        interp.invoke()
+        worst = max(worst, float(np.abs(ref - interp.get_tensor(out["index"])).max()))
+    return worst, [int(d) for d in inp["shape"]]
+
+
 def convert(onnx_path: Path, out_path: Path, trials: int = 5, tol: float = 1e-4) -> float:
     workdir = Path(tempfile.mkdtemp())
     try:
         print("==> onnx2tf")
-        subprocess.run(
+        # Output is captured because onnx2tf is extremely chatty on success, but it
+        # has to be re-emitted on failure - swallowing it leaves a CalledProcessError
+        # with no indication of what went wrong.
+        result = subprocess.run(
             ["onnx2tf", "-i", str(onnx_path), "-o", str(workdir / "sm"), "-nuo", "-osd"],
-            check=True,
             capture_output=True,
+            text=True,
         )
+        if result.returncode != 0:
+            print(result.stdout[-4000:], file=sys.stderr)
+            print(result.stderr[-4000:], file=sys.stderr)
+            raise SystemExit(f"FAILED: onnx2tf exited {result.returncode} (output above)")
 
         sess = ort.InferenceSession(str(onnx_path))
         name = sess.get_inputs()[0].name
@@ -42,35 +106,33 @@ def convert(onnx_path: Path, out_path: Path, trials: int = 5, tol: float = 1e-4)
         sm_shape = [int(d) for d in sig.structured_input_signature[1][key].shape]
         out_key = next(iter(sig.structured_outputs))
 
-        print(f"==> re-exporting: {shape} -> reshape -> {sm_shape}")
+        print(f"==> re-exporting: {shape} -> ? -> {sm_shape}")
 
-        @tf.function(input_signature=[tf.TensorSpec(shape, tf.float32, name="input")])
-        def wrapped(x):
-            return sig(**{key: tf.reshape(x, sm_shape)})[out_key]
+        results = []
+        for label, adapt in adaptations(shape, sm_shape):
+            try:
+                tflite_bytes = build_tflite(sig, key, out_key, shape, adapt)
+                worst, input_shape = max_diff(tflite_bytes, sess, name, shape, trials)
+            except Exception as exc:                                   # noqa: BLE001
+                print(f"    {label:<22} could not be built: {exc}")
+                continue
+            print(f"    {label:<22} max diff vs onnx {worst:.2e}"
+                  f"  {'MATCH' if worst < tol else 'wrong numbers'}")
+            results.append((worst, label, tflite_bytes, input_shape))
 
-        converter = tf.lite.TFLiteConverter.from_concrete_functions(
-            [wrapped.get_concrete_function()]
-        )
-        out_path.write_bytes(converter.convert())
+        if not results:
+            raise SystemExit("FAILED: no adaptation could be built")
 
-        # verify against the ONNX
-        interp = tf.lite.Interpreter(str(out_path))
-        interp.allocate_tensors()
-        inp, out = interp.get_input_details()[0], interp.get_output_details()[0]
-
-        worst = 0.0
-        for _ in range(trials):
-            x = np.random.randn(*shape).astype(np.float32)
-            ref = sess.run(None, {name: x})[0]
-            interp.set_tensor(inp["index"], x)
-            interp.invoke()
-            got = interp.get_tensor(out["index"])
-            worst = max(worst, float(np.abs(ref - got).max()))
-
-        print(f"==> input shape {list(inp['shape'])}, max diff vs onnx {worst:.2e}")
+        worst, label, tflite_bytes, input_shape = min(results, key=lambda r: r[0])
         if worst >= tol:
-            raise SystemExit(f"FAILED: diff {worst:.2e} exceeds tolerance {tol:.0e}")
+            raise SystemExit(
+                f"FAILED: the closest adaptation ({label}) still differs from the "
+                f"ONNX by {worst:.2e}, over the {tol:.0e} tolerance. Writing it would "
+                "ship a model that loads cleanly and never detects."
+            )
 
+        out_path.write_bytes(tflite_bytes)
+        print(f"==> {label}, input shape {input_shape}, max diff vs onnx {worst:.2e}")
         print(f"==> wrote {out_path}")
         return worst
     finally:
