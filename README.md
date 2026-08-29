@@ -11,22 +11,38 @@ Train custom wake word models for [OpenWakeWord](https://github.com/dscripka/ope
 
 ### Typical results
 
-Measured for "hey seeree" against 56 held-out real recordings and a 100-clip synthetic negative corpus, at threshold 0.5 (`eval_model.py`):
+Measured for "hey seeree" (run 9) at threshold 0.5, on recordings made **after** the model trained, plus a 100-clip synthetic negative corpus (`eval_model.py`):
 
 | | result |
 |---|---|
-| detection, phrase spoken alone | 53/56 (95%) |
-| detection, command spoken immediately after | 53/56 (95%) |
-| median latency from end of speech | 77 ms |
+| detection, phrase spoken alone (35 held-out clips) | 34/35 (97%) |
+| **detection, command run straight on** ("hey seeree what's the time", 57 clips) | **30/57 (53%)** |
+| median latency from end of speech | 91 ms |
 | false accepts, general conversation | 0/36 |
 | false accepts, bare commands (no wake word) | 0/12 |
 | false accepts, other assistants ("hey Google", "Alexa") | 0/8 |
 | false accepts, "hey" + a different name | 0/12 |
-| **false accepts, phrase continuing into another word** | **6/20** |
+| **false accepts, phrase continuing into another word** | **7/20** |
 
-The last row is the honest caveat: this model is quiet on ordinary speech but still fires on close phonetic neighbours ("hey serious", "hey series"). Those clips are adversarial by construction — a fifth of the negative corpus — so read the categories separately rather than pooling them into one false-accept rate.
+Two rows are the honest caveats. The model is silent on ordinary speech but still fires on close phonetic neighbours ("hey serious", "hey series") — those clips are adversarial by construction, a fifth of the negative corpus, so read categories separately rather than pooling them. And detection drops to ~53% when a command follows the wake word with no pause, which is the commonest real usage; that is up from 5% before run-on positives were added, but it is the weakest number here.
 
-Results depend heavily on the wake word and on how many real recordings you provide (91 clips from 2 speakers here). `tuning.md` documents the measurements behind these numbers and what moved them.
+Results depend heavily on the wake word and on how much real speech you supply — 195 clips from 2 speakers here, against ~12,600 synthetic. `tuning.md` documents every measurement and what moved it.
+
+### What we learned tuning this
+
+Ten training runs, each measured rather than assumed. The findings that would transfer to any wake word:
+
+**Measure on recordings made after the model trains.** `train.py` trains on everything in `my_real_samples/`, so scoring against that directory reports training accuracy. It overstated detection by ~10 points here, and hid a much larger gap on run-on speech. Record a held-out set into a directory outside that tree.
+
+**Synthetic evaluation misleads in the direction that matters.** A model scoring 100% on synthetic "wake word + command" clips detected 46% of real ones. An earlier test that spliced a command onto a separate recording showed no problem at all, because splicing preserves the phrase's isolated ending — real speech coarticulates the final syllable into the next word, and only a single-utterance recording reproduces that.
+
+**Negatives must include near-misses.** Trained on nine clearly-different phrases, the first model was perfect on other assistants and general conversation and false-accepted 13/20 on "hey serious"-type phrases. Adding confusables cut that by two thirds. Keep them disjoint from whatever you evaluate on, or the measurement becomes memorisation.
+
+**The trailing margin after the wake word is load-bearing.** Positives that end exactly where the phrase ends teach the model to fire without hearing the word finish — false accepts tripled and real run-on detection halved. A margin of ~150–300 ms after the phrase is what distinguishes "the phrase ended" from "the phrase continued into another word".
+
+**The detection threshold, not `max_negative_weight`, is the precision/recall knob.** Doubling the training weight reduced false accepts and cost detection — but compared at matched false-accept rates the two models traded places without either dominating. Retraining bought what a threshold change gives for free.
+
+**Check that the GPU is actually being used.** onnxruntime falls back to CPU silently when its CUDA provider is missing, and openWakeWord picks its thread count from PyTorch — so a CUDA box with the CPU build computes features single-threaded. That was 36 minutes of an 83-minute run. `train.py` now reports the provider it resolved at startup.
 
 ## Requirements
 
@@ -148,7 +164,25 @@ python check_model_alignment.py --model my_custom_model/hey_cal.onnx
 
 `eval_model.py` streams the model over each clip exactly as live detection does, and reports negatives **per category** — the corpus is adversarial by construction, so a pooled false-accept rate is meaningless. `check_model_alignment.py` sweeps where the phrase sits in the window; the gap it peaks at is also the model's latency floor, since it cannot fire until that much audio has arrived after you stop speaking. Both accept `.onnx` or `.tflite` — prefer the `.tflite` if that is what you deploy.
 
-`generate_positives.py` builds synthetic positives across sweeps of speed, level, background noise, and phrase-runs-into-command, which is how the speed ceiling and the run-on weakness in `tuning.md` were found.
+**Score against recordings the model has never seen.** `train.py` trains on everything under `my_real_samples/`, so pointing `--positives` there reports training accuracy — it overstated detection by ~10 points here. Record a held-out set into a directory outside that tree, ideally after training has started:
+
+```bash
+cd record_real_sample
+uv run record_samples.py --wake-word "hey cal" \
+    --output-dir ../my_real_samples_holdout/alex --continuous 180
+
+# and a run-on set, which is the case most likely to be weak
+uv run record_samples.py --wake-word "hey cal" \
+    --output-dir ../my_real_samples_holdout/alex_runon \
+    --continuous 180 --max-ms 4000     # say "hey cal, what's the time" in one breath
+```
+
+```bash
+python eval_model.py --model my_custom_model/hey_cal.onnx \
+    --positives my_real_samples_holdout/alex --negatives negatives_tts
+```
+
+`generate_positives.py` builds synthetic positives across sweeps of speed, level, background noise, and phrase-runs-into-command. Useful for finding weaknesses, but treat it as a lower bound on difficulty: it scored a model at 100% on run-on speech that detected 46% of real run-ons.
 
 ## Configuration
 
@@ -162,6 +196,8 @@ python check_model_alignment.py --model my_custom_model/hey_cal.onnx
 | `--tts-workers` | 2 | Concurrent requests **per server**; total is this times the server count |
 | `--augmentation-rounds` | 3 | Differently-augmented copies of each clip. Multiplies training data at no TTS cost |
 | `--runon-fraction` | 0.4 | Share of positives where the phrase runs straight into a command rather than silence |
+| `--real-copies` | 10 | How many times each real recording is duplicated into the positive set. Weighting, not augmentation |
+| `--max-negative-weight` | 2000 | How hard false positives are penalised. Raising it trades detection for precision — but so does the detection threshold, for free |
 | `--data-dir` | `.` | Training data directory (`/app/data` for Docker) |
 | `--no-trim` | off | Skip silence trimming before augmentation (not recommended) |
 | `--negatives-file` | — | Confusable negative phrases for a wake word with no built-in list |
