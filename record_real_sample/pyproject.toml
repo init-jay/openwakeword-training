@@ -8,11 +8,12 @@ requires-python = ">=3.10"
 # microphone access and must not drag in the pinned torch/tensorflow stack that
 # requirements.txt carries for the trainer.
 #
-# No PyAudio. Capture goes through ffmpeg's avfoundation input, the same approach
-# test_model.py uses, which avoids building PortAudio from source just to record.
-# `ffmpeg` needs to be on PATH.
+# PyAudio is the default capture backend. It needs PortAudio headers to build
+# (macOS: brew install portaudio), which the ffmpeg backend avoids - but ffmpeg
+# recordings came out with audible clicks and pops, so the build step is worth it.
 dependencies = [
     "numpy",
+    "pyaudio",
 ]
 
 [tool.uv]
