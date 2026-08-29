@@ -95,21 +95,25 @@ PLAIN_SPEEDS = (0.7, 1.3)
 #
 # The margin is not padding. It is what lets the model hear that the word ENDED
 # rather than continued, which is the entire discrimination between "hey seeree"
-# and "hey serious". Measured against held-out real recordings, both run-on
-# detection and false accepts move monotonically with it:
+# and "hey serious". Measured against held-out real recordings:
 #
-#   effective margin   held-out run-on   extend+hey_other FA
-#     ~50 ms (run 5)         28%              12/32
-#    ~140 ms (run 6)         40%               8/32
-#    ~200 ms (run 4)         46%               6/32
+#   effective margin   held-out run-on   extend+hey_other FA   latency
+#     ~50 ms (run 5)         28%              12/32             -20 ms
+#    ~140 ms (run 6)         40%               8/32              48 ms
+#    ~200 ms (run 4)         46%               6/32              77 ms
+#    ~225 ms (run 7)         56%               7/32              83 ms
 #
-# Run 4's ~200 ms was an accident - a +153 ms bias in the phrase-alone estimate that
-# the timestamp cut later removed. It still outperformed both settings chosen on
-# purpose. Run 7 tests (150, 300) to find whether the optimum is above 200 ms.
+# Runs 6 and 7 share an identical real-sample corpus and differ only in this
+# constant, so that pair is clean: +85 ms of margin bought +16 points of real
+# run-on detection. That is the relationship this value exists to exploit.
 #
-# Note run 4 also had half the real recordings, so the trend is not fully isolated.
-# If run 7 does not beat 46% run-on and 6/32 false accepts, the relationship was
-# confounded and this should go back to (80, 200).
+# The false-accept column is NOT a gradient. It plateaus at 7-8/32 across a 3x
+# range of margin; the early monotonic reading was mostly the margin escaping the
+# pathological zero case, and run 4 also had half the real data. Do not raise this
+# expecting fewer false accepts.
+#
+# The cost is latency, which tracks margin closely and is at 83 ms against a 120 ms
+# gate. There is roughly one more step of headroom, for diminishing returns.
 RUNON_TAIL_MS = (150.0, 300.0)
 
 # Confusable negatives, per wake word.
@@ -711,7 +715,8 @@ def setup_training_dirs(wake_word: str) -> Path:
 
 
 def create_config(wake_word: str, n_samples: int, training_steps: int,
-                  layer_size: int, data_dir: str, augmentation_rounds: int = 3):
+                  layer_size: int, data_dir: str, augmentation_rounds: int = 3,
+                  max_negative_weight: int = 4000):
     """Create training configuration."""
     safe_name = wake_word.replace(" ", "_").lower()
 
@@ -730,7 +735,20 @@ def create_config(wake_word: str, n_samples: int, training_steps: int,
     config["target_recall"] = 0.5
     config["target_false_positives_per_hour"] = 0.1
     config["output_dir"] = "./my_custom_model"
-    config["max_negative_weight"] = 2000
+
+    # End of a linear ramp: the negative-class loss weight grows from 1 to this
+    # over training (openwakeword/train.py:274), so higher penalises false
+    # positives harder. Raised 2000 -> 4000 for run 8, matching openwakeword's own
+    # escalation step, to attack the extend false accepts that have failed every
+    # run since run 2 and have only ever moved as a side effect of margin changes.
+    #
+    # Note what this cannot fix on its own. openwakeword auto-doubles the weight
+    # between sequences when best_val_fp exceeds target_false_positives_per_hour,
+    # but that is measured on the ACAV100M general-speech validation set, where
+    # this model already scores 0/36. The training loop never sees a phonetic
+    # near-miss, so its automatic tuning has nothing to push against - which is a
+    # plausible reason extend has been immovable.
+    config["max_negative_weight"] = max_negative_weight
 
     # Each round re-augments every clip with a different impulse response,
     # background and gain, so this multiplies the distinct feature vectors without
@@ -809,6 +827,10 @@ def main():
                              "A Kokoro process handles one at a time, so this only "
                              "covers the gap between responses; total concurrency is "
                              "this times the number of servers.")
+    parser.add_argument("--max-negative-weight", type=int, default=4000,
+                        help="How hard false positives are penalised by the end of "
+                             "training (default: %(default)s). Higher is more "
+                             "conservative; watch detection rate when raising it.")
     parser.add_argument("--augmentation-rounds", type=int, default=3,
                         help="How many differently-augmented copies of each clip to "
                              "compute features for (default: %(default)s). Multiplies "
@@ -946,7 +968,7 @@ def main():
 
     # Create config and run training
     create_config(wake_word, n_pos_train, args.training_steps, args.layer_size,
-                  args.data_dir, args.augmentation_rounds)
+                  args.data_dir, args.augmentation_rounds, args.max_negative_weight)
     run_augmentation()
     run_training()
 
