@@ -1181,28 +1181,33 @@ def main():
 
     returncode = run_training()
 
+    # Whether the model was WRITTEN is the real signal, not the exit code.
+    # openwakeword saves the .onnx and then tries to convert it to tflite, which
+    # fails on this image (tensorflow-cpu 2.8.1 against protobuf >= 3.20, the
+    # breakage that patches/ and onnx2tflite.py exist to work around) and exits 1.
+    # Treating that as failure would discard a perfectly good run.
+    fresh = model_path.exists() and (before is None
+                                     or model_path.stat().st_mtime != before)
+
     print("\n" + "=" * 60)
+    if not fresh:
+        print("TRAINING FAILED")
+        print("=" * 60)
+        if not model_path.exists():
+            print(f"{model_path} does not exist.")
+        else:
+            print(f"{model_path} was not rewritten - it is still the PREVIOUS run's")
+            print("model. Do not evaluate or deploy it as though it were this run's.")
+        if returncode != 0:
+            print(f"\nopenwakeword's train.py exited {returncode}; traceback above.")
+        sys.exit(returncode or 1)
+
     if returncode != 0:
-        print("TRAINING FAILED")
+        print(f"NOTE: openwakeword's train.py exited {returncode}, but the model was")
+        print("written. This is normally the tflite conversion failing after the .onnx")
+        print("is already saved - see 'TFLite conversion error at end' in the README.")
+        print("Convert with onnx2tflite.py instead, which verifies the result.")
         print("=" * 60)
-        print(f"openwakeword's train.py exited {returncode}. The traceback is above.")
-        if before is not None:
-            print(f"\n{model_path} is from a PREVIOUS run and has not been updated.")
-            print("Do not evaluate or deploy it as though it were this run's output.")
-        sys.exit(returncode)
-
-    if not model_path.exists():
-        print("TRAINING FAILED")
-        print("=" * 60)
-        print(f"Training reported success but {model_path} does not exist.")
-        sys.exit(1)
-
-    if before is not None and model_path.stat().st_mtime == before:
-        print("TRAINING FAILED")
-        print("=" * 60)
-        print(f"Training reported success but {model_path} was not rewritten - it is")
-        print("still the previous run's model. Treat this as a failure.")
-        sys.exit(1)
 
     print("TRAINING COMPLETE!")
     print("=" * 60)

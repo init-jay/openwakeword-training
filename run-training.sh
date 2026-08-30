@@ -114,21 +114,27 @@ set -e
   wait "$WATCH_PID"; } 2>/dev/null || true
 
 echo
-if [[ $STATUS -ne 0 ]]; then
-    echo "=== TRAINING FAILED (exit $STATUS) - see $LOG"
-    exit "$STATUS"
-fi
-
+# Whether the model was WRITTEN is the real signal, not the exit code. openwakeword
+# saves the .onnx and then tries to convert it to tflite, which fails on this image
+# (tensorflow-cpu 2.8.1 against protobuf >= 3.20) and exits 1. Treating that as a
+# failure would discard a good run - the README documents it under "TFLite
+# conversion error at end".
 if [[ ! -f "$MODEL" ]]; then
-    echo "=== TRAINING FAILED - $MODEL does not exist"
-    exit 1
+    echo "=== TRAINING FAILED (exit $STATUS) - $MODEL does not exist. See $LOG"
+    exit "${STATUS:-1}"
 fi
 
 AFTER_SUM="$(md5sum "$MODEL" | cut -d' ' -f1)"
 if [[ -n "$BEFORE_SUM" && "$BEFORE_SUM" == "$AFTER_SUM" ]]; then
-    echo "=== TRAINING FAILED - $MODEL is unchanged from before this run."
-    echo "    It is the PREVIOUS model. Do not evaluate or deploy it."
-    exit 1
+    echo "=== TRAINING FAILED (exit $STATUS) - $MODEL is unchanged from before this"
+    echo "    run. It is the PREVIOUS model. Do not evaluate or deploy it. See $LOG"
+    exit "${STATUS:-1}"
+fi
+
+if [[ $STATUS -ne 0 ]]; then
+    echo "=== NOTE: training exited $STATUS but the model WAS written."
+    echo "    Normally the tflite conversion failing after the .onnx is saved."
+    echo "    Convert with onnx2tflite.py, which verifies the result."
 fi
 
 # Name the output by commit so a model can be traced back to the code that made it.
