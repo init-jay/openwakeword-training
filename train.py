@@ -82,6 +82,16 @@ TRAINING_COMMANDS = [
 RUNON_SPEEDS = [0.8, 1.0, 1.2, 1.4, 1.6]
 PLAIN_SPEEDS = (0.7, 1.6)
 
+# Batched TTS needs every clip in a request to share one voice AND one speed, so
+# plain speeds are drawn from a grid rather than continuously. 0.05 steps gives 19
+# values across the range - fine enough that the corpus is barely distinguishable
+# from a continuous draw, coarse enough that (voice, speed) buckets hold ~9 clips
+# at the default sample count, which is a usable batch.
+PLAIN_SPEED_STEP = 0.05
+PLAIN_SPEED_GRID = [round(PLAIN_SPEEDS[0] + i * PLAIN_SPEED_STEP, 2)
+                    for i in range(int((PLAIN_SPEEDS[1] - PLAIN_SPEEDS[0])
+                                       / PLAIN_SPEED_STEP) + 1)]
+
 # How much of the command's onset to keep after the wake word ends, in ms.
 #
 # The value that matters is where the phrase ends relative to the END OF THE ARRAY,
@@ -220,9 +230,18 @@ class KokoroPool:
     against one server measured 15.0 it/s versus 14.1 sequential. Extra *processes*
     are what scale, until the cores run out.
 
-    Round-robin per job rather than a static split by index, so it self-balances:
-    a thread that draws a slow server holds it longer and completes fewer jobs,
-    instead of that server becoming a straggler at the end of the batch.
+    Round-robin per job rather than a static split by index, so a thread that draws
+    a slow server holds it longer and completes fewer jobs. That balancing is weak,
+    though - it does not make a slow server free.
+
+    MEASURED: with batching on, adding two remote servers to the two local ones made
+    the run SLOWER, so the local pair alone is the better configuration here.
+    Batching amortises latency, not bandwidth: it pays the ~119 ms fixed cost once
+    per batch instead of once per clip, but the bytes returned are unchanged, and a
+    batch of 16 sends back ~640 KB instead of ~40 KB. The local containers talk over
+    the Docker bridge with no physical network; a remote server over a
+    bandwidth-limited link gains nothing from batching and then takes an equal share
+    of the jobs. Measure before adding servers rather than assuming they help.
     """
 
     def __init__(self, urls):
@@ -370,6 +389,68 @@ def kokoro_tts_timed(kokoro_url: str, voice: str, text: str, speed: float):
         return None, None
 
 
+def kokoro_tts_batch(kokoro_url: str, voice: str, texts: list, speed: float):
+    """Render several utterances in ONE request and split them apart.
+
+    Measured against a Kokoro-FastAPI server: a single "hey seeree" request costs
+    ~119 ms of fixed overhead plus ~42 ms per second of audio, so for a phrase under
+    a second, THREE QUARTERS of the request is overhead. Batching amortises it.
+
+    In isolation a batch of 16-32 reaches ~37 ms/clip against 182 individually (5x),
+    but real batches are smaller: buckets hold `samples_per_voice / len(grid)` clips,
+    about 9.5 for plain positives at the defaults. Measured end to end at that shape
+    it is 137 -> 42 ms/clip, a 3.3x speedup. A coarser speed grid would enlarge the
+    buckets but measured no faster (39 ms/clip at 0.10 steps), so the finer grid is
+    kept for the extra speed diversity.
+
+    The split is exact, not energy-based: /dev/captioned_speech returns per-word
+    start and end times, so each utterance is cut at its own word boundaries. The
+    texts are joined with ". " and the punctuation tokens are filtered back out of
+    the timestamp list.
+
+    Every text in a batch shares one voice and one speed - that is what makes it a
+    single forward pass - so callers must group by (voice, speed) before calling.
+
+    Returns a list of (audio, timestamps) in the order given, with None for any
+    utterance whose words could not be located. Falls back to nothing: a caller
+    seeing None should render that one individually.
+    """
+    if not texts:
+        return []
+
+    joined = ". ".join(t.rstrip(".") for t in texts) + "."
+    data, timestamps = kokoro_tts_timed(kokoro_url, voice, joined, speed)
+    if data is None or not timestamps:
+        return [(None, None)] * len(texts)
+
+    # Punctuation arrives as its own token; drop it so word indices line up.
+    words = [t for t in timestamps if str(t.get("word", "")).strip(".,!?;:")]
+
+    out, cursor = [], 0
+    pad = int(16000 * 30 / 1000)
+    for text in texts:
+        n_words = len(text.split())
+        if cursor + n_words > len(words):
+            out.append((None, None))
+            continue
+        span = words[cursor:cursor + n_words]
+        cursor += n_words
+
+        start = max(0, int(span[0]["start_time"] * 16000) - pad)
+        end = min(len(data), int(span[-1]["end_time"] * 16000) + pad)
+        if end <= start:
+            out.append((None, None))
+            continue
+
+        # Re-base the timestamps so they read as if this clip were rendered alone -
+        # phrase_end_sample and the run-on cut both index from the clip's own start.
+        rebased = [{"word": t.get("word"),
+                    "start_time": t["start_time"] - start / 16000,
+                    "end_time": t["end_time"] - start / 16000} for t in span]
+        out.append((data[start:end], rebased))
+    return out
+
+
 def phrase_end_sample(timestamps, wake_word: str, sr: int = 16000):
     """Sample index where the wake word ends, or None if the words do not line up.
 
@@ -405,7 +486,7 @@ def generate_kokoro_sample(kokoro_url: str, voice: str, text: str, output_dir: P
     return True
 
 
-def run_jobs(jobs, worker, desc: str, workers: int):
+def run_jobs(jobs, worker, desc: str, workers: int, weights=None):
     """Run `worker` over `jobs` in a thread pool, with a progress bar.
 
     Threads rather than processes because every job is a blocking HTTP request to
@@ -421,27 +502,43 @@ def run_jobs(jobs, worker, desc: str, workers: int):
         try:
             return worker(job)
         except Exception:
-            return False
+            return 0
 
+    # Workers return either a bool (one clip) or a count (a batch of clips);
+    # int() covers both, since int(True) is 1.
+    #
+    # `weights` is how many clips each job produces. Without it the bar would count
+    # REQUESTS once batching is on, so "12 it/s" would mean 12 batches - roughly 190
+    # clips/s - and look like a slowdown against the pre-batching 28 clips/s. The bar
+    # counts clips either way.
+    weights = weights or [1] * len(jobs)
     success = 0
-    with tqdm(total=len(jobs), desc=desc) as pbar:
+    with tqdm(total=sum(weights), desc=desc, unit="clip") as pbar:
         with cf.ThreadPoolExecutor(max_workers=workers) as pool:
-            for result in pool.map(guarded, jobs):
-                success += bool(result)
-                pbar.update(1)
+            for weight, result in zip(weights, pool.map(guarded, jobs)):
+                success += int(result)
+                pbar.update(weight)
     return success
 
 
 def generate_kokoro_samples(pool: "KokoroPool", voices: list, output_dir: Path,
                             samples_per_voice: int, texts: list, desc: str,
-                            workers: int = 2):
-    """Generate Kokoro samples for all voices."""
+                            workers: int = 2, batch: int = 16):
+    """Generate Kokoro samples for all voices.
+
+    Clips are rendered in batches sharing one voice and speed, which is a ~5x
+    speedup (182 ms/clip individually, ~37 ms at a batch of 16-32) because three
+    quarters of a short request is fixed overhead. `batch=1` renders each clip in
+    its own request, which is the pre-batching behaviour.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # The job list is built up front, in one thread. Drawing the speed here rather
     # than inside the worker keeps the corpus a function of the seed alone, instead
     # of depending on the order threads happen to run in.
-    jobs = []
+    from collections import defaultdict
+    buckets = defaultdict(list)
+    total = 0
     for v, voice in enumerate(voices):
         for i in range(samples_per_voice):
             # Offset each voice's starting point in the wordlist. Without it every
@@ -449,15 +546,40 @@ def generate_kokoro_samples(pool: "KokoroPool", voices: list, output_dir: Path,
             # samples_per_voice never gets past its own beginning - which the test
             # sets hit as soon as the negative list grew past samples_per_voice//10.
             text = texts[(v * samples_per_voice + i) % len(texts)]
-            jobs.append((voice, text, float(np.random.uniform(*PLAIN_SPEEDS))))
+            speed = float(np.random.choice(PLAIN_SPEED_GRID))
+            buckets[(voice, speed)].append(text)
+            total += 1
 
-    success = run_jobs(
-        jobs,
-        lambda job: generate_kokoro_sample(pool.next(), job[0], job[1], output_dir, job[2]),
-        desc, workers * len(pool))
+    # One job per batch: a (voice, speed) group sliced into chunks.
+    jobs = []
+    for (voice, speed), group in buckets.items():
+        for i in range(0, len(group), batch):
+            jobs.append((voice, speed, group[i:i + batch]))
 
-    print(f"  Generated {success}/{len(jobs)} samples")
-    return success
+    def render(job):
+        voice, speed, group = job
+        url = pool.next()
+        if batch == 1:
+            data = kokoro_tts(url, voice, group[0], speed)
+            results = [(data, None)]
+        else:
+            results = kokoro_tts_batch(url, voice, group, speed)
+
+        written = 0
+        for data, _ in results:
+            if data is None:
+                continue
+            scipy.io.wavfile.write(
+                str(output_dir / f"kokoro_{uuid.uuid4().hex}.wav"), 16000, data)
+            written += 1
+        return written
+
+    written = run_jobs(jobs, render, desc, workers * len(pool),
+                       weights=[len(g) for _, _, g in jobs])
+
+    print(f"  Generated {written}/{total} samples "
+          f"({len(jobs)} request(s), batch {batch})")
+    return written
 
 
 def build_negative_phrases(wake_word: str, negatives_file: str = None,
@@ -511,7 +633,8 @@ def build_negative_phrases(wake_word: str, negatives_file: str = None,
 
 def generate_runon_samples(pool: "KokoroPool", voices: list, output_dir: Path,
                            per_voice: int, wake_word: str, desc: str,
-                           reference: dict = None, workers: int = 2):
+                           reference: dict = None, workers: int = 2,
+                           batch: int = 16):
     """Positives where the phrase runs straight into a command.
 
     The model measured in tuning.md detects 97% of "hey seeree, what's the time?"
@@ -541,23 +664,27 @@ def generate_runon_samples(pool: "KokoroPool", voices: list, output_dir: Path,
     reference_lock = threading.Lock()
     fallbacks = []
 
-    jobs = []
+    # Group by (voice, speed) so a batch can share one request, then chunk. Each
+    # clip keeps its own tail jitter, drawn here so the corpus stays a function of
+    # the seed rather than of thread scheduling.
+    from collections import defaultdict
+    buckets = defaultdict(list)
+    total = 0
     for voice in voices:
         for i in range(per_voice):
-            jobs.append((
-                voice,
-                RUNON_SPEEDS[i % len(RUNON_SPEEDS)],
-                TRAINING_COMMANDS[(i // len(RUNON_SPEEDS)) % len(TRAINING_COMMANDS)],
-                int(16000 * np.random.uniform(*RUNON_TAIL_MS) / 1000),
-            ))
+            speed = RUNON_SPEEDS[i % len(RUNON_SPEEDS)]
+            command = TRAINING_COMMANDS[(i // len(RUNON_SPEEDS)) % len(TRAINING_COMMANDS)]
+            tail = int(16000 * np.random.uniform(*RUNON_TAIL_MS) / 1000)
+            buckets[(voice, speed)].append((command, tail))
+            total += 1
 
-    def render(job):
-        voice, speed, command, tail = job
-        text = f"{wake_word} {command}"
-        kokoro_url = pool.next()
+    jobs = []
+    for (voice, speed), group in buckets.items():
+        for i in range(0, len(group), batch):
+            jobs.append((voice, speed, group[i:i + batch]))
 
-        # Preferred path: the server tells us where the wake word ends.
-        data, timestamps = kokoro_tts_timed(kokoro_url, voice, text, speed)
+    def cut_and_write(data, timestamps, tail, voice, speed, kokoro_url, text):
+        """Cut one run-on clip just past the wake word and write it."""
         cut = phrase_end_sample(timestamps, wake_word) if data is not None else None
 
         if cut is None:
@@ -579,15 +706,33 @@ def generate_runon_samples(pool: "KokoroPool", voices: list, output_dir: Path,
                 fallbacks.append(1)
 
         if data is None or not cut:
-            return False
+            return 0
         data = data[:cut + tail] if cut + tail < len(data) else data
         scipy.io.wavfile.write(str(output_dir / f"runon_{uuid.uuid4().hex}.wav"),
                                16000, data)
-        return True
+        return 1
 
-    success = run_jobs(jobs, render, desc, workers * len(pool))
+    def render(job):
+        voice, speed, group = job
+        kokoro_url = pool.next()
+        texts = [f"{wake_word} {command}" for command, _ in group]
 
-    print(f"  Generated {success}/{len(jobs)} run-on samples")
+        if batch == 1:
+            results = [kokoro_tts_timed(kokoro_url, voice, texts[0], speed)]
+        else:
+            results = kokoro_tts_batch(kokoro_url, voice, texts, speed)
+
+        written = 0
+        for (data, timestamps), (command, tail), text in zip(results, group, texts):
+            written += cut_and_write(data, timestamps, tail, voice, speed,
+                                     kokoro_url, text)
+        return written
+
+    success = run_jobs(jobs, render, desc, workers * len(pool),
+                       weights=[len(g) for _, _, g in jobs])
+
+    print(f"  Generated {success}/{total} run-on samples "
+          f"({len(jobs)} request(s), batch {batch})")
     if fallbacks:
         print(f"  NOTE: {len(fallbacks)} clip(s) fell back to the phrase-alone estimate "
               f"({len(reference)} reference renderings).")
@@ -599,17 +744,23 @@ def generate_runon_samples(pool: "KokoroPool", voices: list, output_dir: Path,
 def copy_real_samples(wake_word: str, output_dir: Path, copies: int = 10) -> int:
     """Copy real voice recordings to training directory, `copies` times each.
 
-    The duplication is a weighting, not augmentation - the same audio repeated, so
-    it buys emphasis without variety. That is a real risk of overfitting to these
-    specific recordings, which is why the held-out set exists.
+    The copies are NOT redundant. They are written before openwakeword's
+    augmentation stage, which globs this whole directory, so each copy is augmented
+    independently: background noise from `background_paths` at p=0.75, a room
+    impulse response, EQ, pitch shift and gain. AddBackgroundNoise runs
+    mode="per_batch" and the copies are named real_{i}_... so sorting spreads them
+    ~195 apart - every copy lands in a different batch and draws different noise.
+    With augmentation_rounds=3 on top, 10 copies means 30 acoustically distinct
+    variants of each recording, not 30 identical ones.
 
-    Raised 3 -> 10 for run 10, as a probe of the dominant hypothesis for the
-    held-out gap: positives are 95.6% synthetic (12,600 Kokoro clips against 210
-    real from 3 speakers), and every measurement this session where synthetic and
-    real disagreed, real was worse. At 10x, real goes from 4.4% to ~14% of the
-    positive class. Class balance in a batch is unaffected - batch_n_per_class
-    fixes that - so this only changes how often a real clip is drawn WITHIN the
-    positive class.
+    That is why raising this from 3 to 10 in run 10 improved generalisation instead
+    of overfitting: held-out run-on detection went 53% -> 77%, the largest single
+    effect measured. Real clips are ~4% of the positive set by default and dominate
+    the result, because real speech carries room, mic and delivery characteristics
+    that Kokoro does not.
+
+    Batch class balance is unaffected (batch_n_per_class fixes that), so this only
+    changes how often a real clip is drawn WITHIN the positive class.
 
     Recordings may sit loose in my_real_samples/ or be grouped one directory per
     speaker (my_real_samples/jay/, my_real_samples/alex/, ...). Both layouts are
@@ -834,7 +985,15 @@ def main():
     parser.add_argument("--wake-word", default="hey cal", help="Wake word/phrase to train")
     parser.add_argument("--samples-per-voice", type=int, default=300,
                         help="Samples per Kokoro voice (default: %(default)s). Raised from\n                             200 when the wordlists grew: 59 negative phrases and 60\n                             run-on command/speed combinations need more renderings each\n                             to keep per-item density up.")
-    parser.add_argument("--training-steps", type=int, default=50000, help="Number of training steps")
+    parser.add_argument("--training-steps", type=int, default=50000,
+                        help="Steps for the first training sequence (default: "
+                             "%(default)s). openwakeword scales warmup, hold and the "
+                             "negative-weight ramp from this, so raising it also "
+                             "slows how fast the negative weight climbs. Run 11 tried "
+                             "100k: detection looked better at threshold 0.5, but at "
+                             "MATCHED false-accept rates it was worse everywhere. It "
+                             "moved the operating point, it did not improve the "
+                             "model. See tuning.md, run 11.")
     parser.add_argument("--layer-size", type=int, default=64, choices=[32, 64, 128], help="Network layer size")
     parser.add_argument("--kokoro-url", default=os.environ.get("KOKORO_URL", "http://localhost:8880"),
                         help="Kokoro TTS URL. Comma-separate several to split the work "
@@ -853,6 +1012,13 @@ def main():
                              "A Kokoro process handles one at a time, so this only "
                              "covers the gap between responses; total concurrency is "
                              "this times the number of servers.")
+    parser.add_argument("--tts-batch", type=int, default=16,
+                        help="Utterances per Kokoro request (default: %(default)s). "
+                             "A short request is ~75%% fixed overhead, so batching "
+                             "is ~3x faster at realistic bucket sizes; clips are split apart exactly, on the "
+                             "server's word timestamps. 1 disables it. Every clip in "
+                             "a batch shares a voice and speed, which is why plain "
+                             "speeds come from a grid rather than a continuous draw.")
     parser.add_argument("--real-copies", type=int, default=10,
                         help="How many times each real recording is duplicated into "
                              "the positive set (default: %(default)s). Weighting, "
@@ -938,10 +1104,10 @@ def main():
           f"({args.runon_fraction:.0%})")
     generate_kokoro_samples(pool, kokoro_voices, pos_train,
                             plain_train, positive_texts, "Kokoro positive train",
-                            args.tts_workers)
+                            args.tts_workers, args.tts_batch)
     generate_kokoro_samples(pool, kokoro_voices, pos_test,
                             plain_test, positive_texts, "Kokoro positive test",
-                            args.tts_workers)
+                            args.tts_workers, args.tts_batch)
 
     if runon_train:
         # One reference cache across both sets: the phrase-alone lengths are the
@@ -949,10 +1115,10 @@ def main():
         reference = {}
         generate_runon_samples(pool, kokoro_voices, pos_train,
                                runon_train, wake_word, "Kokoro run-on train",
-                               reference, args.tts_workers)
+                               reference, args.tts_workers, args.tts_batch)
         generate_runon_samples(pool, kokoro_voices, pos_test,
                                runon_test, wake_word, "Kokoro run-on test",
-                               reference, args.tts_workers)
+                               reference, args.tts_workers, args.tts_batch)
 
     print("\n[Real Voice]")
     real_count = copy_real_samples(wake_word, pos_train, args.real_copies)
@@ -967,10 +1133,10 @@ def main():
     print("\n[Kokoro TTS]")
     generate_kokoro_samples(pool, kokoro_voices, neg_train,
                             args.samples_per_voice, negative_phrases,
-                            "Kokoro negative train", args.tts_workers)
+                            "Kokoro negative train", args.tts_workers, args.tts_batch)
     generate_kokoro_samples(pool, kokoro_voices, neg_test,
                             args.samples_per_voice // 10, negative_phrases,
-                            "Kokoro negative test", args.tts_workers)
+                            "Kokoro negative test", args.tts_workers, args.tts_batch)
 
     # === COUNT SAMPLES ===
     n_pos_train = len(list(pos_train.glob("*.wav")))
@@ -1002,19 +1168,52 @@ def main():
     create_config(wake_word, n_pos_train, args.training_steps, args.layer_size,
                   args.data_dir, args.augmentation_rounds, args.max_negative_weight)
     run_augmentation()
-    run_training()
 
-    # Done
+    # Note the existing model before training. setup_training_dirs clears the
+    # working directory but NOT my_custom_model/<name>.onnx, so a previous run's
+    # model survives here - and if training fails, an unchanged file would be
+    # reported as this run's output. That happened: a CUDA OOM during validation
+    # killed training at 75%, the script still printed "TRAINING COMPLETE!", and
+    # the stale model was copied off the box and evaluated twice before the
+    # identical checksums gave it away.
     model_path = WORK_DIR / "my_custom_model" / f"{safe_name}.onnx"
+    before = model_path.stat().st_mtime if model_path.exists() else None
+
+    returncode = run_training()
+
+    # Whether the model was WRITTEN is the real signal, not the exit code.
+    # openwakeword saves the .onnx and then tries to convert it to tflite, which
+    # fails on this image (tensorflow-cpu 2.8.1 against protobuf >= 3.20, the
+    # breakage that patches/ and onnx2tflite.py exist to work around) and exits 1.
+    # Treating that as failure would discard a perfectly good run.
+    fresh = model_path.exists() and (before is None
+                                     or model_path.stat().st_mtime != before)
+
     print("\n" + "=" * 60)
+    if not fresh:
+        print("TRAINING FAILED")
+        print("=" * 60)
+        if not model_path.exists():
+            print(f"{model_path} does not exist.")
+        else:
+            print(f"{model_path} was not rewritten - it is still the PREVIOUS run's")
+            print("model. Do not evaluate or deploy it as though it were this run's.")
+        if returncode != 0:
+            print(f"\nopenwakeword's train.py exited {returncode}; traceback above.")
+        sys.exit(returncode or 1)
+
+    if returncode != 0:
+        print(f"NOTE: openwakeword's train.py exited {returncode}, but the model was")
+        print("written. This is normally the tflite conversion failing after the .onnx")
+        print("is already saved - see 'TFLite conversion error at end' in the README.")
+        print("Convert with onnx2tflite.py instead, which verifies the result.")
+        print("=" * 60)
+
     print("TRAINING COMPLETE!")
     print("=" * 60)
-    if model_path.exists():
-        size_kb = model_path.stat().st_size / 1024
-        print(f"Model: {model_path} ({size_kb:.0f}KB)")
-        print(f"\nTest with: python test_model.py --model {model_path}")
-    else:
-        print("WARNING: Model file not found!")
+    size_kb = model_path.stat().st_size / 1024
+    print(f"Model: {model_path} ({size_kb:.0f}KB)")
+    print(f"\nTest with: python test_model.py --model {model_path}")
 
 
 if __name__ == "__main__":

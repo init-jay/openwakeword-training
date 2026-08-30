@@ -11,31 +11,33 @@ Train custom wake word models for [OpenWakeWord](https://github.com/dscripka/ope
 
 ### Typical results
 
-Measured for "hey seeree" (run 10) at threshold 0.5, on recordings made **after** the model trained, plus a 100-clip synthetic negative corpus (`eval_model.py`):
+Measured for "hey seeree" on recordings made **after** the model trained, plus a 100-clip synthetic negative corpus (`eval_model.py`). Reported at the threshold that gives 8/32 false accepts on the adversarial categories — see the note on thresholds below, because the default 0.5 is not the right operating point:
 
 | | result |
 |---|---|
-| detection, phrase spoken alone (35 held-out clips) | 32/35 (91%) |
-| detection, command run straight on ("hey seeree what's the time", 57 clips) | 44/57 (77%) |
-| median latency from end of speech | 49 ms |
-| false accepts, general conversation | 0/36 |
-| false accepts, bare commands (no wake word) | 0/12 |
-| false accepts, other assistants ("hey Google", "Alexa") | 0/8 |
-| false accepts, "hey" + a different name | 0/12 |
-| false accepts, similar sounds in running speech | 2/12 |
-| **false accepts, phrase continuing into another word** | **6/20** |
+| detection, phrase spoken alone (35 held-out clips) | 99% |
+| detection, command run straight on ("hey seeree what's the time", 57 clips) | 95% |
+| median latency from end of speech | ~50 ms |
+| false accepts, general conversation / bare commands / other assistants / "hey" + a name | ~0 |
+| **false accepts, phrase continuing into another word** | **8/32** |
 
-The last row is the honest caveat: the model is near-silent on ordinary speech but still fires on close phonetic neighbours ("hey serious", "hey series"). Those clips are adversarial by construction — a fifth of the negative corpus — so read categories separately rather than pooling them into one rate. Detection with a command running straight on (77%) is the weakest detection number, and the commonest real usage; it was 5% before run-on positives were added.
+The last row is the honest caveat and the one thing eleven runs never fixed: the model is near-silent on ordinary speech but still fires on close phonetic neighbours ("hey serious", "hey series"). Those clips are adversarial by construction — a fifth of the negative corpus — so read categories separately rather than pooling them into one rate.
 
-Results depend heavily on the wake word and on how much real speech you supply — 195 clips from 2 speakers here, against ~12,600 synthetic. `tuning.md` documents every measurement and what moved it.
+**Tune the threshold; it matters more than any training setting here.** The same model reads 67% on run-on speech at the default 0.5 and 95% at a lower threshold, for a handful of extra adversarial false accepts. Two runs of an identical configuration can differ by 10 points at a fixed threshold and be identical at matched precision — so compare models, and choose your operating point, on a false-accept budget rather than on 0.5.
+
+Before deploying at a low threshold, score it against a **long recording from the room the device lives in**. The negative corpus here is a few minutes of audio; a wake word runs continuously, and openWakeWord's own tuning targets false positives per *hour* against an 11.3-hour set.
+
+Results depend heavily on the wake word and on how much real speech you supply — 195 clips from 2 speakers here, against ~12,600 synthetic. `tuning.md` documents every run and what moved it.
 
 ### What we learned tuning this
 
 Ten training runs, each measured rather than assumed. The findings that would transfer to any wake word:
 
-**Real recordings are worth far more than their share of the corpus.** They are ~4% of the positives by default and they dominate the result. Raising `--real-copies` from 3 to 10 — reweighting the same 195 clips, no new recordings — took detection of run-on speech from 53% to 77% in a single training run. That is the largest effect found across ten runs, bigger than the trailing margin, the speed range, or the negative-class loss weight. If you only change one thing, record more real speech and weight it heavily.
+**Real recordings are worth far more than their share of the corpus.** They are ~4% of the positives by default and they dominate the result. Raising `--real-copies` from 3 to 10 — the same 195 clips, no new recordings — took detection of run-on speech from 53% to 77% in a single training run. The copies are duplicated *before* augmentation, so each one picks up different background noise and reverb; ten copies become thirty acoustically distinct variants. That is the largest effect found across ten runs, bigger than the trailing margin, the speed range, or the negative-class loss weight. If you only change one thing, record more real speech and weight it heavily.
 
 **Measure on recordings made after the model trains.** `train.py` trains on everything in `my_real_samples/`, so scoring against that directory reports training accuracy. It overstated detection by ~10 points here, and hid a much larger gap on run-on speech. Record a held-out set into a directory outside that tree.
+
+**Compare models at matched false-accept rates, never at a fixed threshold.** Two runs of an identical configuration read 77% and 67% on run-on speech at threshold 0.5, and both reach 95% at 8/32 false accepts. What varies between training runs is largely *where the score distribution sits*, not how well the model separates the classes — so a fixed-threshold comparison measures the operating point, not the model. Several apparent improvements during this work evaporated under matched comparison, in both directions.
 
 **Synthetic evaluation misleads in the direction that matters.** A model scoring 100% on synthetic "wake word + command" clips detected 46% of real ones. An earlier test that spliced a command onto a separate recording showed no problem at all, because splicing preserves the phrase's isolated ending — real speech coarticulates the final syllable into the next word, and only a single-utterance recording reproduces that.
 
@@ -43,15 +45,15 @@ Ten training runs, each measured rather than assumed. The findings that would tr
 
 **The trailing margin after the wake word is load-bearing.** Positives that end exactly where the phrase ends teach the model to fire without hearing the word finish — false accepts tripled and real run-on detection halved. A margin of ~150–300 ms after the phrase is what distinguishes "the phrase ended" from "the phrase continued into another word".
 
-**The detection threshold, not `max_negative_weight`, is the precision/recall knob.** Doubling the training weight reduced false accepts and cost detection — but compared at matched false-accept rates the two models traded places without either dominating. Retraining bought what a threshold change gives for free.
+**The detection threshold, not `max_negative_weight`, is the precision/recall knob.** Doubling the training weight reduced false accepts and cost detection — but compared at matched false-accept rates the two models traded places without either dominating. Retraining bought what a threshold change gives for free, and more: moving the threshold took one model from 67% to 95% on run-on speech.
 
 **Check that the GPU is actually being used.** onnxruntime falls back to CPU silently when its CUDA provider is missing, and openWakeWord picks its thread count from PyTorch — so a CUDA box with the CPU build computes features single-threaded. That was 36 minutes of an 83-minute run. `train.py` now reports the provider it resolved at startup.
 
 ## Requirements
 
-- **NVIDIA GPU** with CUDA (RTX 3060 12GB or better recommended)
+- **NVIDIA GPU** with CUDA (RTX 3090 24GB or better to hold all training data in VRAM)
 - **Docker** with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
-- **~20GB disk space** for training data
+- **~20GB disk space minimum** for training data
 
 ## Quick Start (Docker)
 
@@ -131,10 +133,10 @@ Measured on an RTX 3090 with 42 Kokoro voices at `--samples-per-voice 300` (~20K
 
 | stage | time | share |
 |---|---:|---:|
-| TTS generation (2 Kokoro containers) | ~17 min | 49% |
-| Feature computation (GPU) | ~4 min | 11% |
-| Model training | ~14 min | 40% |
-| **total** | **~35 min** | |
+| TTS generation (2 Kokoro containers, batched) | ~5 min | 31% |
+| Feature computation (GPU) | ~4 min | 25% |
+| Model training (GPU-resident features) | ~7 min | 44% |
+| **total** | **~16 min** | |
 
 How it got there, since the defaults matter:
 
@@ -143,6 +145,8 @@ How it got there, since the defaults matter:
 | CPU feature computation, 1 Kokoro | 83 min |
 | + `onnxruntime-gpu` (features 36 → 4 min) | 52 min |
 | + a second Kokoro container (TTS 34 → 17 min) | 35 min |
+| + GPU-resident features (training 14 → 7 min) | 29 min |
+| + batched TTS (TTS 17 → 5 min) | ~16 min |
 
 **Why more than one Kokoro container:** a Kokoro process is single-threaded and saturates exactly one core, so concurrent requests to one instance simply queue (4 client threads measured 15.0 it/s against 14.1 sequential) while adding instances scales almost linearly (2 instances: 28.7 it/s) — the GPU sits at ~21% throughout, so cores, not the GPU, are the limit.
 
@@ -194,6 +198,13 @@ python eval_model.py --model my_custom_model/hey_cal.onnx \
     --positives my_real_samples_holdout/alex --negatives negatives_tts
 ```
 
+`compare_models.py` compares several models **at matched false-accept rates**, tuning the threshold per model. Use it rather than comparing at 0.5 — two runs of an identical configuration measured 77% and 67% on run-on speech at 0.5 and were identical at matched precision, so a fixed-threshold comparison measures the operating point rather than the model:
+
+```bash
+python compare_models.py --models my_custom_model/hey_seeree/*.onnx
+python compare_models.py --models my_custom_model/hey_cal.onnx --sweep   # choose a threshold
+```
+
 `generate_positives.py` builds synthetic positives across sweeps of speed, level, background noise, and phrase-runs-into-command. Useful for finding weaknesses, but treat it as a lower bound on difficulty: it scored a model at 100% on run-on speech that detected 46% of real run-ons.
 
 ## Configuration
@@ -206,9 +217,10 @@ python eval_model.py --model my_custom_model/hey_cal.onnx \
 | `--layer-size` | 64 | Network size (32, 64, or 128) |
 | `--kokoro-url` | http://localhost:8880 | Kokoro TTS endpoint. Comma-separate several to split the work across them |
 | `--tts-workers` | 2 | Concurrent requests **per server**; total is this times the server count |
+| `--tts-batch` | 16 | Utterances per Kokoro request. A short request is ~75% fixed overhead, so batching is ~3x faster; clips are split apart on the server's word timestamps. `1` disables it |
 | `--augmentation-rounds` | 3 | Differently-augmented copies of each clip. Multiplies training data at no TTS cost |
 | `--runon-fraction` | 0.4 | Share of positives where the phrase runs straight into a command rather than silence |
-| `--real-copies` | 10 | How many times each real recording is duplicated into the positive set. Weighting, not augmentation |
+| `--real-copies` | 10 | Copies of each real recording in the positive set. Each copy is augmented independently, so this multiplies variants, not just weight |
 | `--max-negative-weight` | 2000 | How hard false positives are penalised. Raising it trades detection for precision — but so does the detection threshold, for free |
 | `--data-dir` | `.` | Training data directory (`/app/data` for Docker) |
 | `--no-trim` | off | Skip silence trimming before augmentation (not recommended) |

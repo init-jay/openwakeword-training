@@ -1,11 +1,64 @@
-# Tuning guidance for wake-word training
+# Tuning notebook for wake-word training
 
-Derived from measuring `hey_seeree.onnx` against 56 real recordings and a 100-clip
-synthetic negative corpus. Every number below is measured, not estimated; the method
-is at the end so it can be re-run after a retrain.
+**This is a lab notebook, not reference documentation.** One section per training
+run, newest first, each recording the hypothesis, the commit it ran on, and what the
+measurement said - including the predictions that turned out wrong. It is kept in
+that form deliberately: several conclusions here were reversed by later runs, and the
+reasoning is worth more than the conclusions when picking the next lever.
 
-Priorities are ordered by measured impact per unit of effort, not by how interesting
-they are.
+Eleven runs against "hey seeree", every number measured rather than estimated.
+
+## Current settings and results
+
+    --training-steps 50000        50k beat 100k on run-on, replicated
+    --real-copies 10              the single biggest lever found
+    --runon-fraction 0.4          positives that run into a command
+    --max-negative-weight 2000    4000 traded detection for precision, no net gain
+    --samples-per-voice 300
+    --augmentation-rounds 3
+    RUNON_TAIL_MS = (150, 300)    trailing margin; must not reach zero
+    PLAIN_SPEEDS  = (0.7, 1.6)
+
+**Ship candidate: `9a938fb`** — see the batched-TTS section for why it is preferred
+over `eea1c56` and `41c5cbc`, which it does not measurably beat. Tune the threshold
+before deploying; 0.5 is the wrong operating point.
+
+Best models, on recordings made after they trained, at 8/32 adversarial false
+accepts:
+
+| | |
+|---|---|
+| held-out plain (35 clips) | **99%** |
+| held-out run-on (57 clips) | **95%** |
+| median latency from end of speech | ~50 ms |
+
+Where it started: 63% plain, **5%** run-on, 13/20 false accepts on "hey serious",
+220 ms latency, 83 minutes per run (now ~16).
+
+## Three rules, learned the expensive way
+
+**1. Score on recordings made AFTER the model trained.** `train.py` trains on
+everything under `my_real_samples/`, so pointing an evaluation there reports training
+accuracy. It overstated detection by ~10 points and hid a much larger gap on run-on
+speech. Eight runs were judged on contaminated numbers before this was noticed.
+
+**2. Compare models at matched false-accept rates, never at a fixed threshold.** Two
+runs of an identical configuration read 77% and 67% run-on at threshold 0.5 and both
+reach 95% at 8/32 false accepts. What varies between runs is where the score
+distribution sits, not how well the model separates classes. Several conclusions in
+the sections below were drawn at a fixed 0.5 and are unreliable for that reason; the
+large effects survive re-checking, the few-point ones do not.
+
+**3. Synthetic evaluation is a lower bound on difficulty, not a gate.** A model
+scoring 100% on synthetic "wake word + command" clips detected 46% of real ones. An
+earlier splice-based test showed no problem at all. The synthetic speed sweep, at six
+voices per point, measures which voices are hard rather than which speeds.
+
+The one thing never solved: **false accepts on close phonetic neighbours** ("hey
+serious", "hey series"). 13/20 at the start, 6-8/32 since, and no lever tried has
+moved it much. Real recordings of near-misses, spoken by the actual users in the
+actual room, are the untried idea most likely to help - by symmetry with real
+positives, which turned out to matter far more than their 4% share of the corpus.
 
 ---
 
@@ -86,6 +139,236 @@ and it is the largest single-variable gain in held-out plain detection so far.
 
 **Run 9 is the ship candidate**, ahead of run 7 on plain by 8 points for 3 points of
 run-on.
+
+---
+
+## Batched TTS: `9a938fb` — 4.85x faster generation, no measurable quality cost
+
+Kokoro renders several utterances per request, split apart on the server's word
+timestamps (`--tts-batch 16`). A short request is ~75% fixed overhead - ~119 ms fixed
+plus ~42 ms per second of audio - so batching a sub-second phrase amortises most of
+it. Positive generation went **17:14 -> 3:33**.
+
+This changed the CORPUS, unlike the GPU-resident feature patch: plain speeds now come
+from a 19-value grid instead of a continuous draw (every clip in a batch must share
+one voice and speed), phrases carry mid-sequence prosody, and levels are ~12% lower.
+So it needed validating rather than assuming.
+
+| | non-batched (`41c5cbc`) | batched (`9a938fb`) |
+|---|---:|---:|
+| alignment peak | 160 ms | **160 ms** |
+| firing band | 40-320 ms | **80-240 ms** |
+| `extend` + `hey_other` | 4/32 | 6/32 |
+| ordinary negatives | 0/68 | **0/68** |
+| held-out plain, 6/32 FA | 97% | **100%** |
+| held-out run-on, 6/32 FA | 75% | **82%** |
+| held-out run-on, 8/32 FA | 95% | 91% |
+
+Comparable throughout, with the differences inside the +/-10 point noise band that
+replicates established. **The alignment band is the reassuring part** - 80-240 ms is
+the tightest of any recent model, so mid-sequence prosody did not move where the
+phrase sits in the window, which was the specific risk.
+
+Keep batching on.
+
+### `9a938fb` IS THE SHIP CANDIDATE
+
+Not because it beats the others - it does not, measurably; at matched precision it
+sits inside the noise band with `eea1c56` and `41c5cbc`. It is the candidate because
+among three statistically indistinguishable models it has the cleanest supporting
+evidence:
+
+* **tightest alignment band**, 80-240 ms, peak 160 ms - the least latency headroom
+  wasted, and furthest from both failure modes (a band reaching 0 ms means firing
+  before the word ends; a peak past 400 ms means trailing silence in training)
+* **every ordinary negative category at 0** - general conversation, bare commands,
+  other assistants, running speech, 0/68 in total
+* **best at 6/32 false accepts** (100% plain / 82% run-on), which is nearer a
+  realistic operating point than the looser matched points
+* produced by the current pipeline end to end, so it is the one that is actually
+  reproducible from a commit
+
+Deploy notes:
+
+* **Do not deploy at threshold 0.5.** Tune it on a false-accept budget - the same
+  model reads 74% run-on at 0.5 and 82-91% lower down. Latency also reads 123 ms at
+  0.5, over the 120 ms gate, purely as an artefact of the operating point.
+* **Validate the chosen threshold against a long recording of the deployment room**
+  before going below ~0.1. The negative corpus is a few minutes of audio; a wake word
+  runs continuously.
+* Convert with `onnx2tflite.py`, which verifies the conversion numerically - a
+  wrong-axis tflite loads cleanly and detects nothing.
+
+The caveat that applies to all three: they are separated by less than the measurement
+can resolve. 35 plain and 57 run-on clips from one speaker in one session means a
+single clip is 3 and 1.8 points. A second held-out session is worth more than another
+training run.
+
+**Two pipeline failures found on the way here, both silent:**
+
+* `train.py` reported "TRAINING COMPLETE!" after a CUDA OOM killed training at 75%,
+  pointing at the PREVIOUS run's model - `setup_training_dirs` clears the working
+  directory but not `my_custom_model/<name>.onnx`. That stale model was evaluated
+  twice before identical checksums across six matched-precision points gave it away;
+  at threshold 0.5 alone it looked like a plausible new result. Both `train.py` and
+  `run-training.sh` now verify the model was actually rewritten, and treat freshness
+  rather than the exit code as ground truth - openwakeword exits 1 on the known
+  tflite conversion failure *after* saving a good `.onnx`.
+* The OOM itself was openwakeword moving the whole false-positive validation set to
+  the GPU in one 2.76 GiB allocation, on top of 16.6 GiB of resident features. Now
+  batched at 4096 rows, and `run-training.sh` stops the Kokoro containers (~2.4 GiB
+  of CUDA context) before training starts.
+
+---
+
+## Replicates: what varies run to run is the THRESHOLD, not the model
+
+`41c5cbc` repeats run 10's configuration exactly - 50k steps, `--real-copies 10`,
+`max_negative_weight 2000` - differing only by the GPU-resident features patch, which
+changes no training dynamics. So it is a replicate, and with the two 100k runs there
+are now two samples at each of two configurations.
+
+At threshold 0.5 the replicates look 10 points apart:
+
+| | 50k #1 (run 10) | 50k #2 (41c5cbc) |
+|---|---:|---:|
+| held-out plain | 91% | 97% |
+| held-out run-on | 77% | 67% |
+
+At MATCHED false-accept counts they are identical:
+
+| FA 8/32 | plain | run-on |
+|---|---:|---:|
+| 50k #1 | 97% | **95%** |
+| 50k #2 | 100% | **95%** |
+| 100k #1 | 97% | 77% |
+| 100k #2 | 100% | 86% |
+
+| config | plain (mean, spread) | run-on (mean, spread) |
+|---|---|---|
+| **50k** | 99% (3) | **95% (0)** |
+| 100k | 99% (3) | 82% (9) |
+
+**Two conclusions, one methodological and more important than the other.**
+
+**50k beats 100k for run-on detection**, replicated, with zero spread between the 50k
+runs. The run 11 verdict was right; the VRAM run that appeared to overturn it sat
+inside 100k's own wide spread. Keep `--training-steps 50000`.
+
+**What varies between runs is where the score distribution sits, not how well the
+model separates the classes.** Two 50k models reading 77% and 67% at threshold 0.5
+both reach 95% at 8/32 false accepts. The "run-to-run variance" diagnosed earlier is
+largely threshold placement.
+
+That means **comparing models at a fixed threshold has been misleading throughout
+this document**, and any conclusion drawn from a few points of difference at 0.5
+should be re-checked at matched precision before it is trusted. It also means the
+detection threshold is worth more than any training change measured here: 41c5cbc
+goes from 67% to 95% run-on by moving it, with no retrain.
+
+Thresholds for `41c5cbc`:
+
+| thr | plain | run-on | `extend`+`hey_other` | other negatives |
+|---|---|---|---|---|
+| 0.50 | 97% | 67% | 4/32 | 0/68 |
+| 0.10 | 97% | 75% | 7/32 | 1/68 |
+| 0.05 | 97% | 81% | 8/32 | 3/68 |
+| 0.01 | 100% | 95% | 8/32 | 4/68 |
+
+**Do not deploy at 0.01 on this evidence.** The negative corpus is ~100 clips, a few
+minutes of audio; openwakeword's own tuning targets false-positives-per-HOUR against
+11.3 hours. The `other negatives` column going 0 -> 4 across that range is the one to
+watch, since those are ordinary speech. Validate against a long recording from the
+deployment room before choosing anything below ~0.1.
+
+---
+
+## Run 11: `77aa984` — 100k steps looked better and was worse
+
+At threshold 0.5 it is the best model yet. At matched precision it is the worst of
+the recent runs.
+
+| threshold 0.5 | run 10 | run 11 |
+|---|---:|---:|
+| held-out plain | 91% | **100%** |
+| held-out run-on | 77% | **84%** |
+| `extend` + `hey_other` FA | 6/32 | **10/32** |
+| `extend` median score | 0.017 | **0.292** |
+
+Held-out detection at MATCHED false-accept counts, threshold tuned per model:
+
+| FA | run 10 | run 11 |
+|---|---|---|
+| 4/32 | **91% / 68%** | 80% / 58% |
+| 6/32 | **94% / 81%** | 94% / 68% |
+| 8/32 | **97% / 95%** | 97% / 77% |
+| 10/32 | **100% / 95%** | 100% / 84% |
+
+Run 10 is better or equal at every point, and much better on run-ons. Run 11's
+apparent gain was entirely an operating-point shift: doubling `--training-steps`
+halves the rate of the negative-weight ramp (`np.linspace(1, max_negative_weight,
+steps)`), so the model is penalised less for false positives throughout training. The
+whole score distribution moved up - the `extend` median went 0.017 -> 0.292.
+
+**Reverted to 50k.** This is the second time a change looked good at a fixed
+threshold and vanished under matched-precision comparison; run 8 was the first, in
+the opposite direction. **Any future change that moves detection and false accepts
+the same way should be checked this way before it is believed.**
+
+### The bigger finding: threshold 0.5 is a poor operating point
+
+Run 10 across thresholds, on held-out real recordings:
+
+| thr | plain | run-on | `extend`+`hey_other` | all other negatives |
+|---|---|---|---|---|
+| **0.50** | 91% | 77% | 6/32 | 2/68 |
+| 0.25 | 94% | 84% | 7/32 | 3/68 |
+| 0.15 | 94% | 86% | 7/32 | 3/68 |
+| **0.05** | **97%** | **91%** | 7/32 | 3/68 |
+
+Lowering the threshold to 0.05 buys +6 points plain and +14 points run-on for ONE
+extra adversarial false accept - more than run 11 gained by training twice as long,
+with no retrain at all. Run 10's score distribution is strongly bimodal: real
+positives score high, negatives score near zero, and very little sits between.
+
+**Validate before deploying below ~0.1.** The negative corpus is ~100 clips, only a
+few minutes of audio. A wake word runs continuously, and openwakeword's own tuning
+targets false-positives-per-HOUR against an 11.3-hour validation set. A threshold
+that costs one extra false accept across five minutes of adversarial clips may cost
+many per hour on real background audio. Test on a long recording from the room the
+satellite lives in before committing.
+
+---
+
+## Run 11 (setup): `--training-steps` 50k -> 100k
+
+Never tested. Distinct feature vectors went up ~4.5x across runs 4-10 (samples_per_voice
+200 -> 300, augmentation_rounds 1 -> 3, real_copies 3 -> 10) while steps stayed at
+50,000, so each vector is revisited far less than it used to be. This is the cheapest
+untried lever: ~9 extra minutes on a run that now takes ~35.
+
+**It is not purely "train longer".** openwakeword derives `warmup_steps` (steps/5),
+`hold_steps` (steps/3) and the negative-weight ramp `np.linspace(1, max_negative_weight,
+steps)` from this value, and runs two further sequences at steps/10 each. Doubling it
+therefore also **halves the rate at which the negative weight climbs** - at any given
+step the model is penalised less for false positives than it was before. Run 8 showed
+that weight schedule moves detection and false accepts in opposite directions, so both
+should be expected to shift.
+
+| | run 10 | run 11 |
+|---|---:|---|
+| held-out plain | 91% | **rises** -> was under-trained |
+| held-out run-on | 77% | **rises** -> same |
+| `extend` + `hey_other` FA | 6/32 | may *worsen* - slower weight ramp |
+| trained-set plain | 98% | if this rises while held-out is flat, it is memorising |
+
+If everything is flat, 50k was already enough and this is settled cheaply. If detection
+rises while false accepts worsen, that is the weight-schedule side effect rather than
+better training, and the two can be separated by re-running at 100k with
+`--max-negative-weight 4000` to restore the original ramp rate.
+
+Corpus unchanged from run 10 (160 jay + 35 ryan on the training server; jen's 8 and
+ryan's newest 7 are still only on the recording machine).
 
 ---
 
