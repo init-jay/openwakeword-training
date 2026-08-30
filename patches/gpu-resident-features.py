@@ -10,16 +10,19 @@ per step, wrapping at the end - so at ~119 steps/s it completes a full pass ever
 ~46 s, roughly 9 passes in 50,000 steps. The working set sits just under total RAM,
 so each pass evicts what the next one needs and the kernel swaps to keep up.
 
-17.28 GB fits in 24 GB of VRAM with the model and activations (~3.5 GB), leaving
-~4 GB spare - provided the Kokoro containers are stopped first, since their two
-CUDA contexts hold ~2.4 GB and are idle by the time training starts:
+17.28 GB fits in 24 GB of VRAM alongside the model and activations, but the margin
+is thin and the peak is NOT during training - it is during validation. STOP THE
+KOKORO CONTAINERS FIRST; their two CUDA contexts hold ~2.4 GB and are idle by then:
 
     docker compose stop kokoro kokoro2
+
+Leaving them up is what caused a CUDA OOM at 37,500 of 50,000 steps, at the first
+validation, after generation and feature computation had already run.
 
 This changes NO training dynamics: same arrays, same sequential order, same batch
 composition. Only where the bytes live changes.
 
-Three edits:
+Four edits:
 
 1. `mmap_batch_generator.__init__` - copy each array to a CUDA tensor, in chunks so
    the host never holds more than one chunk. np.load without mmap_mode would need a
@@ -35,6 +38,10 @@ Three edits:
 3. `train.py` - `num_workers=0`. CUDA tensors cannot cross a fork, so the current
    `num_workers=os.cpu_count()//2` would fail outright. With the data resident in
    VRAM there is no IO left to overlap, so the workers have nothing to do anyway.
+
+4. `train.py` - validate the false-positive set in chunks of 4096 rather than in one
+   batch the size of the whole set (~2.76 GiB). That spike, not the steady state, is
+   what runs out of memory. The metric is a count over the whole set either way.
 
 There is deliberately NO fallback to the mmap path. A silent fallback would leave
 the run looking healthy while delivering none of the benefit - which is exactly how
@@ -145,6 +152,24 @@ if target == "data":
     edits.append((old_tail, new_tail))
 
 else:
+    # 3b. Validate in chunks rather than one 2.76 GiB allocation.
+    #
+    # openwakeword sets batch_size to the whole false-positive validation set, so
+    # every validation moves ~2.76 GiB to the GPU at once. With 16.6 GiB of resident
+    # features that spike is what runs out of memory - and it does so at whatever
+    # percentage of training the first validation falls on, after the expensive
+    # stages have already completed. 4096 rows is ~48 MiB per step; the metric is a
+    # count over the whole set either way, so chunking does not change it.
+    old_val = """        X_val_fp = torch.utils.data.DataLoader(
+            torch.utils.data.TensorDataset(torch.from_numpy(X_val_fp), torch.from_numpy(X_val_fp_labels)),
+            batch_size=len(X_val_fp_labels)
+        )"""
+    new_val = """        X_val_fp = torch.utils.data.DataLoader(
+            torch.utils.data.TensorDataset(torch.from_numpy(X_val_fp), torch.from_numpy(X_val_fp_labels)),
+            batch_size=min(4096, len(X_val_fp_labels))
+        )"""
+    edits.append((old_val, new_val))
+
     # 3. CUDA tensors cannot cross a fork, and there is no IO left to overlap.
     old_loader = """        X_train = torch.utils.data.DataLoader(IterDataset(batch_generator),
                                               batch_size=None, num_workers=n_cpus, prefetch_factor=16)"""

@@ -1168,19 +1168,47 @@ def main():
     create_config(wake_word, n_pos_train, args.training_steps, args.layer_size,
                   args.data_dir, args.augmentation_rounds, args.max_negative_weight)
     run_augmentation()
-    run_training()
 
-    # Done
+    # Note the existing model before training. setup_training_dirs clears the
+    # working directory but NOT my_custom_model/<name>.onnx, so a previous run's
+    # model survives here - and if training fails, an unchanged file would be
+    # reported as this run's output. That happened: a CUDA OOM during validation
+    # killed training at 75%, the script still printed "TRAINING COMPLETE!", and
+    # the stale model was copied off the box and evaluated twice before the
+    # identical checksums gave it away.
     model_path = WORK_DIR / "my_custom_model" / f"{safe_name}.onnx"
+    before = model_path.stat().st_mtime if model_path.exists() else None
+
+    returncode = run_training()
+
     print("\n" + "=" * 60)
+    if returncode != 0:
+        print("TRAINING FAILED")
+        print("=" * 60)
+        print(f"openwakeword's train.py exited {returncode}. The traceback is above.")
+        if before is not None:
+            print(f"\n{model_path} is from a PREVIOUS run and has not been updated.")
+            print("Do not evaluate or deploy it as though it were this run's output.")
+        sys.exit(returncode)
+
+    if not model_path.exists():
+        print("TRAINING FAILED")
+        print("=" * 60)
+        print(f"Training reported success but {model_path} does not exist.")
+        sys.exit(1)
+
+    if before is not None and model_path.stat().st_mtime == before:
+        print("TRAINING FAILED")
+        print("=" * 60)
+        print(f"Training reported success but {model_path} was not rewritten - it is")
+        print("still the previous run's model. Treat this as a failure.")
+        sys.exit(1)
+
     print("TRAINING COMPLETE!")
     print("=" * 60)
-    if model_path.exists():
-        size_kb = model_path.stat().st_size / 1024
-        print(f"Model: {model_path} ({size_kb:.0f}KB)")
-        print(f"\nTest with: python test_model.py --model {model_path}")
-    else:
-        print("WARNING: Model file not found!")
+    size_kb = model_path.stat().st_size / 1024
+    print(f"Model: {model_path} ({size_kb:.0f}KB)")
+    print(f"\nTest with: python test_model.py --model {model_path}")
 
 
 if __name__ == "__main__":
