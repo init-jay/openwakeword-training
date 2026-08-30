@@ -51,9 +51,9 @@ Ten training runs, each measured rather than assumed. The findings that would tr
 
 ## Requirements
 
-- **NVIDIA GPU** with CUDA (RTX 3060 12GB or better recommended)
+- **NVIDIA GPU** with CUDA (RTX 3090 24GB or better to hold all training data in VRAM)
 - **Docker** with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
-- **~20GB disk space** for training data
+- **~20GB disk space minimum** for training data
 
 ## Quick Start (Docker)
 
