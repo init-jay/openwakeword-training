@@ -50,6 +50,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Rebuild first. train.py and the openwakeword patches are baked into the image, so
+# a code change that is not rebuilt runs the previous version - which is how a
+# validation-batching fix appeared to have no effect and the OOM recurred. Cached
+# layers make this a few seconds when nothing has changed.
+echo "=== $(date '+%H:%M:%S')  building trainer image"
+docker compose build trainer
+
 echo "=== $(date '+%H:%M:%S')  starting Kokoro"
 docker compose up -d kokoro kokoro2
 
@@ -73,9 +80,23 @@ echo "=== $(date '+%H:%M:%S')  training (log: $LOG)"
 # Stop Kokoro the moment feature computation finishes, freeing its ~2.4 GiB before
 # openwakeword's validation allocation needs it. Started before training so the
 # marker cannot be missed.
-( tail -f "$LOG" 2>/dev/null | grep -q "Training model" \
-    && echo "=== $(date '+%H:%M:%S')  training stage reached, stopping Kokoro" \
-    && docker compose stop kokoro kokoro2 >/dev/null 2>&1 ) &
+# Poll the log rather than `tail -f | grep -q`. That pipeline is fragile in two
+# ways that both fail SILENTLY, leaving Kokoro running and reproducing the OOM this
+# exists to prevent: with pipefail inherited, grep -q exiting on a match kills
+# tail -f with SIGPIPE and the pipeline reports failure, so the `&&` never runs; and
+# BSD grep buffers stdin, so it may never process a line until EOF, which tail -f
+# never sends. A polling loop has neither problem.
+MAIN_PID=$$
+(
+    while kill -0 "$MAIN_PID" 2>/dev/null; do
+        if grep -q "Training model" "$LOG" 2>/dev/null; then
+            echo "=== $(date '+%H:%M:%S')  training stage reached, stopping Kokoro"
+            docker compose stop kokoro kokoro2 >/dev/null 2>&1 || true
+            break
+        fi
+        sleep 2
+    done
+) &
 WATCH_PID=$!
 
 # Foreground, so PIPESTATUS gives docker's exit code rather than tee's - a
