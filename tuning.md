@@ -19,8 +19,12 @@ Eleven runs against "hey seeree", every number measured rather than estimated.
     RUNON_TAIL_MS = (150, 300)    trailing margin; must not reach zero
     PLAIN_SPEEDS  = (0.7, 1.6)
 
-Best models (`eea1c56`, `41c5cbc`), on recordings made after they trained, at 8/32
-adversarial false accepts:
+**Ship candidate: `9a938fb`** — see the batched-TTS section for why it is preferred
+over `eea1c56` and `41c5cbc`, which it does not measurably beat. Tune the threshold
+before deploying; 0.5 is the wrong operating point.
+
+Best models, on recordings made after they trained, at 8/32 adversarial false
+accepts:
 
 | | |
 |---|---|
@@ -135,6 +139,85 @@ and it is the largest single-variable gain in held-out plain detection so far.
 
 **Run 9 is the ship candidate**, ahead of run 7 on plain by 8 points for 3 points of
 run-on.
+
+---
+
+## Batched TTS: `9a938fb` — 4.85x faster generation, no measurable quality cost
+
+Kokoro renders several utterances per request, split apart on the server's word
+timestamps (`--tts-batch 16`). A short request is ~75% fixed overhead - ~119 ms fixed
+plus ~42 ms per second of audio - so batching a sub-second phrase amortises most of
+it. Positive generation went **17:14 -> 3:33**.
+
+This changed the CORPUS, unlike the GPU-resident feature patch: plain speeds now come
+from a 19-value grid instead of a continuous draw (every clip in a batch must share
+one voice and speed), phrases carry mid-sequence prosody, and levels are ~12% lower.
+So it needed validating rather than assuming.
+
+| | non-batched (`41c5cbc`) | batched (`9a938fb`) |
+|---|---:|---:|
+| alignment peak | 160 ms | **160 ms** |
+| firing band | 40-320 ms | **80-240 ms** |
+| `extend` + `hey_other` | 4/32 | 6/32 |
+| ordinary negatives | 0/68 | **0/68** |
+| held-out plain, 6/32 FA | 97% | **100%** |
+| held-out run-on, 6/32 FA | 75% | **82%** |
+| held-out run-on, 8/32 FA | 95% | 91% |
+
+Comparable throughout, with the differences inside the +/-10 point noise band that
+replicates established. **The alignment band is the reassuring part** - 80-240 ms is
+the tightest of any recent model, so mid-sequence prosody did not move where the
+phrase sits in the window, which was the specific risk.
+
+Keep batching on.
+
+### `9a938fb` IS THE SHIP CANDIDATE
+
+Not because it beats the others - it does not, measurably; at matched precision it
+sits inside the noise band with `eea1c56` and `41c5cbc`. It is the candidate because
+among three statistically indistinguishable models it has the cleanest supporting
+evidence:
+
+* **tightest alignment band**, 80-240 ms, peak 160 ms - the least latency headroom
+  wasted, and furthest from both failure modes (a band reaching 0 ms means firing
+  before the word ends; a peak past 400 ms means trailing silence in training)
+* **every ordinary negative category at 0** - general conversation, bare commands,
+  other assistants, running speech, 0/68 in total
+* **best at 6/32 false accepts** (100% plain / 82% run-on), which is nearer a
+  realistic operating point than the looser matched points
+* produced by the current pipeline end to end, so it is the one that is actually
+  reproducible from a commit
+
+Deploy notes:
+
+* **Do not deploy at threshold 0.5.** Tune it on a false-accept budget - the same
+  model reads 74% run-on at 0.5 and 82-91% lower down. Latency also reads 123 ms at
+  0.5, over the 120 ms gate, purely as an artefact of the operating point.
+* **Validate the chosen threshold against a long recording of the deployment room**
+  before going below ~0.1. The negative corpus is a few minutes of audio; a wake word
+  runs continuously.
+* Convert with `onnx2tflite.py`, which verifies the conversion numerically - a
+  wrong-axis tflite loads cleanly and detects nothing.
+
+The caveat that applies to all three: they are separated by less than the measurement
+can resolve. 35 plain and 57 run-on clips from one speaker in one session means a
+single clip is 3 and 1.8 points. A second held-out session is worth more than another
+training run.
+
+**Two pipeline failures found on the way here, both silent:**
+
+* `train.py` reported "TRAINING COMPLETE!" after a CUDA OOM killed training at 75%,
+  pointing at the PREVIOUS run's model - `setup_training_dirs` clears the working
+  directory but not `my_custom_model/<name>.onnx`. That stale model was evaluated
+  twice before identical checksums across six matched-precision points gave it away;
+  at threshold 0.5 alone it looked like a plausible new result. Both `train.py` and
+  `run-training.sh` now verify the model was actually rewritten, and treat freshness
+  rather than the exit code as ground truth - openwakeword exits 1 on the known
+  tflite conversion failure *after* saving a good `.onnx`.
+* The OOM itself was openwakeword moving the whole false-positive validation set to
+  the GPU in one 2.76 GiB allocation, on top of 16.6 GiB of resident features. Now
+  batched at 4096 rows, and `run-training.sh` stops the Kokoro containers (~2.4 GiB
+  of CUDA context) before training starts.
 
 ---
 

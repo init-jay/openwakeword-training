@@ -198,6 +198,13 @@ python eval_model.py --model my_custom_model/hey_cal.onnx \
     --positives my_real_samples_holdout/alex --negatives negatives_tts
 ```
 
+`compare_models.py` compares several models **at matched false-accept rates**, tuning the threshold per model. Use it rather than comparing at 0.5 — two runs of an identical configuration measured 77% and 67% on run-on speech at 0.5 and were identical at matched precision, so a fixed-threshold comparison measures the operating point rather than the model:
+
+```bash
+python compare_models.py --models my_custom_model/hey_seeree/*.onnx
+python compare_models.py --models my_custom_model/hey_cal.onnx --sweep   # choose a threshold
+```
+
 `generate_positives.py` builds synthetic positives across sweeps of speed, level, background noise, and phrase-runs-into-command. Useful for finding weaknesses, but treat it as a lower bound on difficulty: it scored a model at 100% on run-on speech that detected 46% of real run-ons.
 
 ## Configuration
