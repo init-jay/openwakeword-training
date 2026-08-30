@@ -99,12 +99,26 @@ MAIN_PID=$$
 ) &
 WATCH_PID=$!
 
-# Foreground, so PIPESTATUS gives docker's exit code rather than tee's - a
-# backgrounded pipeline would report tee's status and call a failed run a success.
+# Build the command with each argument quoted, so it survives being passed to
+# `script` as a single string.
+CMD="docker compose run --rm trainer python train.py"
+CMD="$CMD --wake-word $(printf '%q' "$WAKE_WORD") --data-dir /app/data"
+for arg in "$@"; do CMD="$CMD $(printf '%q' "$arg")"; done
+
+# Run under `script` so the container gets a pty. Piping to tee otherwise denies
+# docker a TTY, and tqdm then has no terminal to draw on - the training progress
+# bar disappears entirely. `script -e` propagates the child's exit status.
+#
+# Foreground with PIPESTATUS, because a backgrounded pipeline reports tee's status
+# rather than docker's and would call a failed run a success.
 set +e
-docker compose run --rm trainer \
-    python train.py --wake-word "$WAKE_WORD" --data-dir /app/data "$@" 2>&1 \
-    | tee -a "$LOG"
+if script -qec true /dev/null >/dev/null 2>&1; then
+    script -qec "$CMD" /dev/null 2>&1 | tee -a "$LOG"
+else
+    # BSD/macOS script takes different flags; fall back to a plain pipe, which
+    # costs the live progress bar but keeps the log and the exit status.
+    eval "$CMD" 2>&1 | tee -a "$LOG"
+fi
 STATUS=${PIPESTATUS[0]}
 set -e
 
