@@ -118,10 +118,24 @@ def main():
     stems = [Path(p).stem for p in args.models]
     prefix = len(os.path.commonprefix(stems)) if len(stems) > 1 else 0
 
-    scores = {}
+    # Disambiguate labels. Comparing the .onnx and .tflite of one model - the check
+    # that a conversion is faithful - gives both the same stem, and a colliding key
+    # would silently drop one from every table.
+    labels, seen = [], {}
     for path in args.models:
+        base = (Path(path).stem[prefix:] or Path(path).stem)[:args.label_width]
+        if base in seen or any(Path(o).stem == Path(path).stem and o != path
+                               for o in args.models):
+            base = f"{base}{Path(path).suffix}"[:args.label_width]
+        while base in seen:
+            seen[base] += 1
+            base = f"{base}#{seen[base]}"[:args.label_width]
+        seen[base] = 0
+        labels.append(base)
+
+    scores = {}
+    for path, label in zip(args.models, labels):
         model, name = load_model(path)
-        label = (Path(path).stem[prefix:] or Path(path).stem)[:args.label_width]
         scores[label] = {k: peak_scores(model, name, v) for k, v in sets.items()}
         scores[label]["adv"] = peak_scores(model, name, adversarial)
         scores[label]["ord"] = peak_scores(model, name, ordinary)
