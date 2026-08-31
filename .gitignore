@@ -41,3 +41,4 @@ __pycache__/
 .venv-eval/
 vtlp_demo/
 voice_audit/
+voice_audit_piper/

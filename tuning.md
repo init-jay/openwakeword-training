@@ -6,7 +6,7 @@ measurement said - including the predictions that turned out wrong. It is kept i
 that form deliberately: several conclusions here were reversed by later runs, and the
 reasoning is worth more than the conclusions when picking the next lever.
 
-Twelve runs against "hey seeree", every number measured rather than estimated.
+Fifteen runs against "hey seeree", every number measured rather than estimated.
 
 ## Current settings and results
 
@@ -21,19 +21,19 @@ Twelve runs against "hey seeree", every number measured rather than estimated.
     PLAIN_SPEEDS  = (0.7, 1.6)
     MISPRONOUNCING_VOICES         6 of 42 voices say the wrong word - exclude by ear
 
-**Ship candidate: `68b37db`** (run 13) — the first model that detects both speakers.
-Run 14 did not displace it: it fails the latency gate at 160 ms, for a reason now
-understood and fixed (see run 14).
-It does not beat `9a938fb` on the adult, but `9a938fb` reads 33% on the 4-year-old at
-threshold 0.5 and `68b37db` reads 67%. Tune the threshold before deploying; 0.5 is the
-wrong operating point, and more so for this model than its predecessors.
+**Ship candidate: `92ac528`** (run 15) — run 14's corpus fixes with run 13's alignment.
+It detects no better than `68b37db` on any measurement that survives the noise band; it
+is the candidate because it is equal on detection *and* passes the latency gate (110 ms,
+peak 120 ms) that run 14 failed at 160 ms. Deploy at **0.15**, not 0.5.
 
 Best models at 8/32 adversarial false accepts, on held-out recordings, **scored per
 speaker — never pooled**:
 
 | plain / run-on | jay, adult (35/57) | ryan, age 4 (6/14) | ryan plain at thr 0.5 |
 |---|---|---|---|
-| `68b37db` run 13 | 97% / 86% | 83% / 79% | **67%** |
+| `92ac528` run 15 | **100% / 84%** | 83% / **86%** | **83%** |
+| `66d876e` run 14 | **100% / 84%** | **100% / 86%** | 50% |
+| `68b37db` run 13 | 97% / 86% | 83% / 79% | 67% |
 | `9a938fb` run 11 | **100% / 91%** | 83% / 79% | 33% |
 | `2213187` run 12 | 97% / 84% | 50% / 79% | 17% |
 
@@ -43,7 +43,11 @@ See run 13 for why the result is still credible.
 Where it started, on jay: 63% plain, **5%** run-on, 13/20 false accepts on "hey
 serious", 220 ms latency, 83 minutes per run (now ~16). On ryan, before run 13: 24%.
 
-Never solved: `extend` false accepts, 6/32 across every run since run 6.
+Never solved: `extend` false accepts, 6-8/32 across every run since run 6.
+
+Watch in run 16: run 15 is the first model to false-accept an *ordinary* speech clip
+("...series... seriously good", 0.938 against 0.005-0.138 elsewhere). One clip, so not
+yet an effect - but `general`/`command`/`other_ww`/`running` had been clean since run 6.
 
 ## Four rules, learned the expensive way
 
@@ -176,6 +180,86 @@ numbers: a different voice is ~0.70, one step of `PLAIN_SPEED_GRID` is ~0.29, an
 plain re-request of the identical prompt is ~0.05 (Kokoro is not deterministic, but
 repeats carry ~1/6 the novelty of one speed step - which is why raising
 `--samples-per-voice` is the weakest diversity lever available).
+
+---
+
+## Run 15: `92ac528` — the alignment fix worked, and it is the only thing that moved
+
+One change against run 14: `...` and `!!` dropped from `positive_texts`, `wake_word`
+listed twice to weight the plain rendering back up. Predicted mean tail per plain
+positive +30 ms -> +10 ms, and with it the alignment peak back near run 13's.
+
+### Alignment: the prediction held, and then some
+
+| | run 13 `68b37db` | run 14 `66d876e` | run 15 `92ac528` |
+|---|---|---|---|
+| alignment peak | 160 ms | 200 ms | **120 ms** |
+| firing band | 80-240 ms | 160-280 ms | **80-280 ms** |
+| median latency (jay) | 91 ms | 160 ms - FAIL | **110 ms** - pass |
+| p90 latency (jay) | 162 ms | 243 ms | 169 ms |
+
+The latency floor is back at 80 ms, the gate passes, and the peak is *tighter* than
+run 13's. **The tail-length mechanism is now confirmed in both directions**: adding
+~24 ms of mean tail moved the peak +40 ms in run 14, removing it moved the peak -80 ms
+here. This is the second time trailing material has moved alignment (RUNON_TAIL_MS v1
+was the first), and it is now the most reliably reproducible effect in this notebook.
+
+Median latency on ryan is 60 ms, p90 204 ms.
+
+### Detection: within the noise band of run 13 and run 14
+
+Jay, 35 plain / 57 run-on, plain/run-on at matched adversarial false accepts:
+
+| adv FA | `92ac528` | `66d876e` | `68b37db` | `9a938fb` |
+|---|---:|---:|---:|---:|
+| 6/32 | 86 / 67 | 86 / 60 | **97** / **86** | **100** / 82 |
+| 8/32 | **100** / 84 | **100** / 84 | 97 / 86 | **100** / **91** |
+| 10/32 | 100 / 88 | 100 / 93 | 100 / **98** | 100 / 96 |
+
+Ryan, 6 plain / 14 run-on:
+
+| adv FA | `92ac528` | `66d876e` | `68b37db` | `9a938fb` |
+|---|---:|---:|---:|---:|
+| 6/32 | 50 / **86** | **67** / 79 | **67** / 79 | 50 / 79 |
+| 8/32 | 83 / **86** | **100** / **86** | 83 / 79 | 83 / 79 |
+| 10/32 | 100 / 86 | 100 / 86 | 100 / **93** | 83 / 86 |
+
+Nothing here clears the 10-point bar on run-on. Run 15 matches run 14 exactly on jay
+at 8/32 and trails run 13 at 6/32 by the same margin run 14 did. **The alignment fix
+did not cost detection and did not buy any** - which is the expected result, since it
+changed where the phrase sits in the window, not what the model can separate.
+
+What did move is the *default* operating point on the child: at threshold 0.5 run 15
+reads 83% plain / 86% run-on on ryan, against run 13's 67% / 79% and run 11's 33% /
+64%. That is a distribution shift, not better separation - rule 2 - but it is the shift
+in the useful direction, and it means 0.5 is no longer badly wrong for ryan.
+
+### The one regression: an ordinary-speech false accept
+
+`running_020_af_sarah.wav` - *"I watched the whole series last night and it was
+seriously good"* - scores **0.938** on run 15. On the other three models it is 0.138,
+0.005 and 0.015. It fires at every threshold in the sweep, so no operating point
+avoids it, and `ordinary` reads 1/68 for run 15 against 0/68 for run 13 at 0.5.
+
+This is one clip, and by rule 3 one clip is not an effect. But it is in the category
+that is supposed to be zero, and `running` is `extend` without the "hey" - the phrase
+carries both "series" and "seriously". The most likely reading is that weighting the
+plain rendering back up (two `wake_word` entries out of six) sharpened the model on the
+bare phrase at the cost of a little margin against phrase-like material with no "hey"
+in front. Worth watching in run 16; not worth acting on yet.
+
+### Ship candidate: `92ac528` (run 15) displaces `68b37db`
+
+Not because it detects better - it does not, on any measurement that survives the noise
+band. Because it is the first model that is equal on detection *and* correct on
+alignment: peak 120 ms, latency 110 ms, gate passed. Run 13 held the candidacy only
+because run 14 broke latency; run 15 has run 14's corpus fixes with run 13's alignment.
+
+Deploy at **0.15**, not 0.5: jay 100% plain / 84% run-on, ryan 83% / 86%, 8/32
+adversarial, 1/68 ordinary. Below 0.10 the adversarial count starts climbing and the
+gain is one of ryan's six plain clips.
+
+Open, unchanged since run 6: `extend` false accepts, 6-8/32.
 
 ---
 

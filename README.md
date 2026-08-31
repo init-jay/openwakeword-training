@@ -303,17 +303,25 @@ Training metrics use synthetic test samples. Real-world performance is usually b
 - Try lowering detection threshold (default 0.5)
 
 ### TFLite conversion error at end
-Ignore - the ONNX model is saved successfully before this error.
+Ignore - the ONNX model is saved successfully before this error. openWakeWord converts
+through `onnx_tf`, which this image does not carry; convert with `onnx2tflite.py`
+instead, which verifies the result against the source ONNX:
 
-Run this on the jupyter lab box with tf-lab container
 ```bash
-docker compose run --rm \
-    -v ~/openwakeword-training:/oww -w /oww \
-    jupyter bash -c \
-    "pip install -q onnxruntime onnx2tf onnx onnx-graphsurgeon sng4onnx tf_keras psutil ai-edge-litert && \
-     python onnx2tflite.py my_custom_model/hey_seeree.onnx \
-        -o my_custom_model/hey_seeree.tflite"
+docker compose run --rm --no-deps trainer \
+    python onnx2tflite.py /app/my_custom_model/hey_seeree/hey_seeree_92ac528.onnx \
+        -o /app/my_custom_model/hey_seeree/hey_seeree_92ac528.tflite
 ```
+
+`--no-deps` matters: the conversion is CPU-only and does not need the two Kokoro GPU
+services that `trainer` otherwise starts. `my_custom_model/` is already mounted, so the
+`.tflite` lands next to the `.onnx` on the host.
+
+The script scores each candidate conversion against the source ONNX on random inputs
+and refuses to write one that disagrees, so a successful run is already the check that
+matters - a wrong-axis tflite loads cleanly, reports a plausible input shape, and never
+detects. Scoring the `.tflite` on real audio afterwards is a separate job for the eval
+environment, which needs `ai-edge-litert` alongside `onnxruntime`.
 
 ## Credits
 

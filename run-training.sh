@@ -129,9 +129,10 @@ set -e
 
 echo
 # Whether the model was WRITTEN is the real signal, not the exit code. openwakeword
-# saves the .onnx and then tries to convert it to tflite, which fails on this image
-# (tensorflow-cpu 2.8.1 against protobuf >= 3.20) and exits 1. Treating that as a
-# failure would discard a good run - the README documents it under "TFLite
+# saves the .onnx and then tries to convert it to tflite via onnx_tf, which this
+# image deliberately does not carry (it never worked - tensorflow-cpu 2.8.1 against
+# protobuf >= 3.20 - and onnx2tf replaced it), so that step exits 1. Treating that
+# as a failure would discard a good run - the README documents it under "TFLite
 # conversion error at end".
 if [[ ! -f "$MODEL" ]]; then
     echo "=== TRAINING FAILED (exit $STATUS) - $MODEL does not exist. See $LOG"

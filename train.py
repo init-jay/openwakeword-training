@@ -1453,9 +1453,11 @@ def main():
 
     # Whether the model was WRITTEN is the real signal, not the exit code.
     # openwakeword saves the .onnx and then tries to convert it to tflite, which
-    # fails on this image (tensorflow-cpu 2.8.1 against protobuf >= 3.20, the
-    # breakage that patches/ and onnx2tflite.py exist to work around) and exits 1.
-    # Treating that as failure would discard a perfectly good run.
+    # fails on this image and exits 1. Its conversion goes through onnx_tf, which
+    # is deliberately not installed - onnx_tf 1.10 is abandoned and never worked
+    # here anyway (tensorflow-cpu 2.8.1 against protobuf >= 3.20), so the image
+    # carries onnx2tf and onnx2tflite.py in its place. Treating that exit as
+    # failure would discard a perfectly good run.
     fresh = model_path.exists() and (before is None
                                      or model_path.stat().st_mtime != before)
 

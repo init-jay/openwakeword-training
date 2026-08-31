@@ -25,7 +25,33 @@ deep-phonemizer==0.0.19
 piper-phonemize
 webrtcvad
 
-# ONNX conversion (CPU-only is fine for this step)
-tensorflow-cpu==2.8.1
-tensorflow_probability==0.16.0
-onnx_tf==1.10.0
+# ONNX -> tflite conversion, for onnx2tflite.py.
+#
+# Replaces the tensorflow-cpu==2.8.1 / tensorflow_probability / onnx_tf trio
+# that openWakeWord's setup.py asks for in its extras. That stack never worked
+# here (2.8.1 against protobuf >= 3.20) - which is why onnx2tflite.py exists -
+# so it was ~500MB of dead weight in the image.
+#
+# `tensorflow`, NOT `tensorflow-cpu`, even though this step is CPU-only.
+# onnx2tf's own requirement is `tensorflow>=2.21,<2.22`, and pip satisfies that
+# with the `tensorflow` DISTRIBUTION specifically - asking for tensorflow-cpu
+# gets you both, two distributions writing the same `tensorflow/` package, with
+# whichever lands last winning. The plain wheel is safe here: CUDA libraries
+# arrive only via the `tensorflow[and-cuda]` extra, so no nvidia-* wheels are
+# pulled and nothing disturbs the ones the Dockerfile points onnxruntime-gpu's
+# loader at. Verified by dry-run resolve on python:3.10-slim: no nvidia-*, and
+# numpy holds at 1.26.4 under the `numpy<2` pin above.
+#
+# Only tensorflow is pinned, to the version proven on the training server.
+# onnx2tf tracks TensorFlow releases closely and is left floating; it is checked
+# by onnx2tflite.py, which scores every candidate conversion against the source
+# ONNX and refuses to write a model that disagrees, so a bad combination fails
+# loudly at conversion time rather than shipping.
+tensorflow==2.21.0
+onnx
+onnx2tf
+onnx-graphsurgeon
+sng4onnx
+tf_keras
+psutil
+ai-edge-litert

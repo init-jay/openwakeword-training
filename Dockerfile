@@ -87,7 +87,17 @@ RUN mkdir -p openwakeword/openwakeword/resources/models \
     && curl -L -o openwakeword/openwakeword/resources/models/melspectrogram.onnx \
         'https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/melspectrogram.onnx'
 
+# The onnx -> tflite toolchain, checked here rather than at conversion time. The
+# conversion runs AFTER a ~16 minute training run, so a dependency set that only
+# resolves on paper would be discovered at the worst possible moment. PATH is
+# checked as well as the import because onnx2tflite.py shells out to onnx2tf as
+# a CLI rather than importing it.
+RUN python3 -c "import tensorflow as tf; print('tensorflow', tf.__version__)" \
+    && python3 -c "import onnx2tf" \
+    && command -v onnx2tf
+
 # Copy training scripts
 COPY train.py .
+COPY onnx2tflite.py .
 COPY setup-data.sh .
 RUN chmod +x setup-data.sh

@@ -17,6 +17,11 @@ docker compose run --rm trainer python train.py --wake-word "hey cal" --data-dir
 # Where does the trained model want the phrase in the window? (needs openwakeword)
 docker compose run --rm -v $(pwd)/check_model_alignment.py:/app/check_model_alignment.py \
     trainer python check_model_alignment.py --model /app/my_custom_model/hey_cal.onnx
+
+# Convert to tflite. --no-deps because the conversion is CPU-only and does not
+# need the Kokoro GPU services that `trainer` otherwise starts.
+docker compose run --rm --no-deps trainer \
+    python onnx2tflite.py /app/my_custom_model/hey_cal.onnx -o /app/my_custom_model/hey_cal.tflite
 ```
 
 ### Host (mic access needed)
