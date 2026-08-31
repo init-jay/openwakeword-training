@@ -1310,13 +1310,33 @@ def main():
     #
     # `.lower()` is also gone: it is the same STRING as `wake_word` for a lowercase
     # wake word, so it was a literal duplicate slot.
+    #
+    # PUNCTUATION LEAVES A TAIL, AND THE TAIL MOVES THE ALIGNMENT. Run 14 shipped
+    # `...` and `!!` in this list and the alignment peak went 160 -> 200 ms with the
+    # firing floor 80 -> 160 ms, putting median latency at 160 ms against a 120 ms
+    # gate. create_fixed_size_clip aligns the END OF THE ARRAY with the end of the
+    # window (see trim_silence), so anything trailing the phrase - a drawn-out
+    # ending, a breath - displaces the phrase earlier in the window, and the model
+    # learns to wait longer before firing.
+    #
+    # Trailing material surviving trim_silence, vs the plain rendering, median over
+    # 8 voices: `...` +95 ms, `!!` +55 ms, `?` +20 ms, `!` +15 ms, `.` +15 ms,
+    # `,` +10 ms. The two heavy ones are gone. It is strongly voice-dependent -
+    # am_liam and bf_emma add 120-170 ms to EVERY punctuated variant while af_sarah
+    # adds nothing - so this is a property of the corpus as a whole, not of one mark.
+    #
+    # `wake_word` appears twice on purpose. The pre-run-14 list held three
+    # plain-equivalent entries (`wake_word`, `.lower()` which was the same string,
+    # and `.title()` which renders identically), and that is why its alignment was
+    # tight. Weighting plain back up keeps the mean tail near +10 ms, against +30 ms
+    # for run 14's list. Prosody diversity is worth less than alignment: the spread
+    # here is 0.09-0.44 in embedding distance, while a different voice is 0.70.
     positive_texts = [
         wake_word,
+        wake_word,
         f"{wake_word}!",
-        f"{wake_word}!!",
         f"{wake_word}?",
         f"{wake_word},",
-        f"{wake_word}...",
         f"{wake_word}.",
     ]
 

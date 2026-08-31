@@ -22,6 +22,8 @@ Twelve runs against "hey seeree", every number measured rather than estimated.
     MISPRONOUNCING_VOICES         6 of 42 voices say the wrong word - exclude by ear
 
 **Ship candidate: `68b37db`** (run 13) — the first model that detects both speakers.
+Run 14 did not displace it: it fails the latency gate at 160 ms, for a reason now
+understood and fixed (see run 14).
 It does not beat `9a938fb` on the adult, but `9a938fb` reads 33% on the 4-year-old at
 threshold 0.5 and `68b37db` reads 67%. Tune the threshold before deploying; 0.5 is the
 wrong operating point, and more so for this model than its predecessors.
@@ -174,6 +176,102 @@ numbers: a different voice is ~0.70, one step of `PLAIN_SPEED_GRID` is ~0.29, an
 plain re-request of the identical prompt is ~0.05 (Kokoro is not deterministic, but
 repeats carry ~1/6 the novelty of one speed step - which is why raising
 `--samples-per-voice` is the weakest diversity lever available).
+
+---
+
+## Run 14: `66d876e` — the bug fixes landed, and a new bug landed with them
+
+Two corpus fixes against run 13, nothing else: `.upper()` out of `positive_texts`, six
+mispronouncing voices excluded. The real-sample corpus is byte-identical to run 13, so
+this should have been a clean read on what a fifth of a mislabelled corpus was costing.
+
+It was not, because **the same commit also rewrote `positive_texts` to seven
+punctuation variants, and two of them carry a trailing tail.** The measurement is
+confounded, and the confound is the more interesting half.
+
+### The alignment regression
+
+| | run 13 `68b37db` | run 14 `66d876e` |
+|---|---|---|
+| alignment peak | 160 ms | **200 ms** |
+| firing band | 80-240 ms | **160-280 ms** |
+| median latency | 91 ms | **160 ms** - fails the 120 ms gate |
+| p90 latency | 162 ms | 243 ms |
+
+The latency floor doubled. `create_fixed_size_clip` aligns the END OF THE ARRAY with
+the end of the window, so anything trailing the phrase pushes the phrase earlier in
+the window and the model learns to wait longer before firing. This is the exact
+mechanism `trim_silence` exists to prevent and that RUNON_TAIL_MS v1 hit before.
+
+Measured directly - trailing material surviving `trim_silence`, against the plain
+rendering, median over 8 voices:
+
+| variant | added tail |
+|---|---:|
+| `hey seeree...` | **+95 ms** |
+| `hey seeree!!` | **+55 ms** |
+| `hey seeree?` | +20 ms |
+| `hey seeree!` | +15 ms |
+| `hey seeree.` | +15 ms |
+| `hey seeree,` | +10 ms |
+
+Weighted over the list, run 14 averaged **+30 ms of tail per plain positive against
+~+6 ms before it**. That is the whole regression.
+
+It is strongly voice-dependent, which is worth knowing on its own: am_liam and bf_emma
+add 120-170 ms to *every* punctuated variant, af_sarah adds nothing. So the tail is a
+property of the corpus mix, not of any one punctuation mark.
+
+**Fixed for run 15**: `...` and `!!` dropped, and `wake_word` listed twice. The
+pre-run-14 list held three plain-equivalent entries - `wake_word`, `.lower()` which
+was the same string, and `.title()` which renders identically - and that is why its
+alignment was tight. Removing the duplicates removed the plain weighting along with
+them, which was not noticed at the time. New mean tail: +10 ms.
+
+### Detection: nothing conclusive, which is the point
+
+Jay, 35 plain / 57 run-on:
+
+| adv FA | `66d876e` | `68b37db` | `9a938fb` |
+|---|---:|---:|---:|
+| 6/32 | 86 / 60 | **97** / **86** | **100** / 82 |
+| 8/32 | **100** / 84 | 97 / 86 | **100** / **91** |
+| 10/32 | 100 / 93 | 100 / **98** | 100 / 96 |
+| at 0.5 | 83% / 56% | 94% / 77% | **97%** / 74% |
+
+Ryan, 6 plain / 14 run-on:
+
+| adv FA | `66d876e` | `68b37db` | `9a938fb` |
+|---|---:|---:|---:|
+| 4/32 | **50** / **79** | 17 / 57 | 0 / 36 |
+| 6/32 | 67 / 79 | 67 / 79 | 50 / 79 |
+| 8/32 | **100** / **86** | 83 / 79 | 83 / 79 |
+| at 0.5 | 50% / 79% | **67%** / 79% | 33% / 64% |
+
+Run 14 is ahead of run 13 on ryan at 4/32 and 8/32, behind at 0.5, level at 6/32.
+On jay it is behind at 6/32 and ahead at 8/32. **Every one of those is inside the
++/-10 point replicate band, and the whole picture is dominated by run 14's scores
+sitting lower** - it needs a lower threshold to reach the same precision, which is the
+operating-point shift this file has been fooled by twice before.
+
+`extend` stayed at 6/32 and ordinary negatives at 0/68, as in every run since run 6.
+
+**No conclusion is available about the corpus bugs.** Removing a fifth of the
+mislabelled positives should help, and nothing here says it did or did not, because
+the alignment regression landed in the same commit. Run 15 is the retry: same fixes,
+tail-free text list.
+
+### What this cost, and the rule that follows
+
+The `positive_texts` rewrite was justified with embedding distances and never checked
+against the one property this pipeline is most sensitive to. **Alignment is checked
+with `check_model_alignment.py` after the fact, but trailing material is measurable
+before a run** - trim a rendering and compare its length to the plain one. That check
+now exists in the comment above the list. Anything added to `positive_texts` needs it,
+alongside the listening test the uppercase bug already earned.
+
+**Ship candidate stays `68b37db`.** Run 14 fails the latency gate at 160 ms and beats
+it nowhere that survives the noise band.
 
 ---
 
