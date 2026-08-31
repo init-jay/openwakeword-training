@@ -168,6 +168,35 @@ CHILD_STRETCH = {"f": (1.20, 1.35), "m": (1.15, 1.30)}
 # real-clip density drives the result, so buying ryan by spending jay is not a win.
 CHILD_STRETCH_FRACTION = 0.5
 
+# Voices that mispronounce the wake word, per wake word.
+#
+# A wake word worth having is not a dictionary word, so Kokoro's g2p has to guess at
+# it - and some voices guess differently. These six say something that is not "hey
+# seeree", judged by ear over all 42 English voices rendering the phrase once
+# (vtlp_demo/voices/). Every clip such a voice produces is a mislabelled positive,
+# and at 1/42 of the voice list that is ~2.4% of the Kokoro corpus each, ~14% for
+# the six together - across plain AND run-on, since both draw from this list.
+#
+# Keyed per wake word: how a voice handles "seeree" says nothing about how it would
+# handle another phrase, so a global blocklist would be wrong for the next model.
+# Same reasoning as CONFUSABLE_NEGATIVES.
+#
+# HOW TO REBUILD THIS FOR A NEW WAKE WORD: render every voice saying the phrase once
+# and listen to all of them. It takes a couple of minutes and there is no shortcut -
+# duration does not work as a proxy. bm_fable sits at exactly the median length
+# (1121 ms, 1.00x) and is wrong; af_v0sky is 16% below median and is fine. The same
+# proxy also cleared "HEY SEEREE" as merely emphatic when it was spelled out.
+#
+# Excluded from negatives too, not just positives. A mispronunciation is arguably a
+# useful near-miss to train against, but it is much closer to the real phrase than
+# CONFUSABLE_NEGATIVES entries are, and teaching the model to REJECT something that
+# close risks costing detection on genuine variants. Untested either way.
+MISPRONOUNCING_VOICES = {
+    "hey_seeree": [
+        "af_alloy", "am_echo", "bf_alice", "bf_lily", "bm_daniel", "bm_fable",
+    ],
+}
+
 # Confusable negatives, per wake word.
 #
 # A model trained only on BASE_NEGATIVES rejects exactly what it was shown and
@@ -1187,6 +1216,10 @@ def main():
                         help="Fraction of positives where the phrase runs straight "
                              "into a command instead of being followed by quiet "
                              "(default: %(default)s). 0 disables them.")
+    parser.add_argument("--exclude-voices", default="",
+                        help="Comma-separated Kokoro voices to skip, added to the "
+                             "built-in MISPRONOUNCING_VOICES list for this wake "
+                             "word. Use for a wake word with no built-in entry.")
     parser.add_argument("--child-fraction", type=float,
                         default=CHILD_STRETCH_FRACTION,
                         help="Fraction of Kokoro positives that get an ADDITIONAL "
@@ -1219,6 +1252,21 @@ def main():
         sys.exit(1)
     print(f"  {len(pool)} server(s), {len(kokoro_voices)} shared English voices")
 
+    excluded = set(MISPRONOUNCING_VOICES.get(safe_name, []))
+    excluded.update(v.strip() for v in args.exclude_voices.split(",") if v.strip())
+    if excluded:
+        present = sorted(v for v in kokoro_voices if v in excluded)
+        kokoro_voices = [v for v in kokoro_voices if v not in excluded]
+        print(f"  Excluding {len(present)} voice(s) that mispronounce the wake word: "
+              f"{', '.join(present)}")
+        print(f"  {len(kokoro_voices)} voices remain")
+        missing = sorted(excluded - set(present))
+        if missing:
+            print(f"  NOTE: {', '.join(missing)} not offered by these servers anyway")
+        if not kokoro_voices:
+            print("ERROR: every available voice is excluded!")
+            sys.exit(1)
+
     # Setup directories
     base_dir = setup_training_dirs(wake_word)
     pos_train = base_dir / "positive_train"
@@ -1226,13 +1274,49 @@ def main():
     neg_train = base_dir / "negative_train"
     neg_test = base_dir / "negative_test"
 
-    # Text variations for positive samples
+    # Text variations for positive samples.
+    #
+    # NO UPPERCASE. `wake_word.upper()` was in this list for the first twelve runs
+    # and it renders the invented word as SPELLED-OUT LETTERS - "hey S-E-E-R-E-E" -
+    # which was then labelled as the wake word. A sixth of the plain positives were
+    # mislabelled that whole time. Caught by ear; the measurements that were
+    # supposed to catch it both failed, and how they failed is the point:
+    #
+    #   * duration: 1083 ms against 965 ms, only +12%. Spelling six letters should
+    #     have doubled it. Too weak a signal to conclude anything from, and it was
+    #     read as "emphatic delivery" instead.
+    #   * embedding distance: 0.535 from plain, about the same as a DIFFERENT VOICE
+    #     (0.70). That was read as "lots of diversity" when it was really "this is
+    #     not the same phrase".
+    #
+    # A large distance from the plain rendering cannot distinguish useful variety
+    # from a different utterance. Anything added here must be LISTENED to.
+    #
+    # It is uppercase on the invented word specifically: "HEY seeree" measures 0.031
+    # from plain (nothing happens), while "hey SEEREE" measures 0.030 from
+    # "HEY SEEREE" (both spell it). A real word in caps is fine; the wake word is
+    # not a real word, which is the whole reason it makes a good wake word.
+    #
+    # What is left is punctuation, which changes prosody without touching
+    # pronunciation. Distances from plain (af_bella / am_adam):
+    #
+    #   hey seeree,    0.437 / 0.344
+    #   hey seeree!    0.291 / 0.201
+    #   hey seeree...  0.264 / 0.523
+    #   hey seeree!!   0.158 / 0.232
+    #   hey seeree?    0.105 / 0.304
+    #   hey seeree.    0.086 / 0.294
+    #   Hey Seeree     0.027 / 0.053   <- dropped, indistinguishable from plain
+    #
+    # `.lower()` is also gone: it is the same STRING as `wake_word` for a lowercase
+    # wake word, so it was a literal duplicate slot.
     positive_texts = [
         wake_word,
-        wake_word.title(),
-        wake_word.lower(),
-        wake_word.upper(),
         f"{wake_word}!",
+        f"{wake_word}!!",
+        f"{wake_word}?",
+        f"{wake_word},",
+        f"{wake_word}...",
         f"{wake_word}.",
     ]
 

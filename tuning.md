@@ -69,6 +69,107 @@ positives, which turned out to matter far more than their 4% share of the corpus
 
 ---
 
+## Corpus bug, runs 1-12: six voices say the wrong word
+
+Six of the 42 English voices do not say "hey seeree": **af_alloy, am_echo, bf_alice,
+bf_lily, bm_daniel, bm_fable**. Judged by ear over every voice rendering the phrase
+once (`vtlp_demo/voices/`, one file per voice). Now in `MISPRONOUNCING_VOICES`, keyed
+per wake word, and excluded from positives and negatives alike.
+
+A wake word worth having is not a dictionary word, so Kokoro's g2p has to guess at it,
+and voices guess differently. Every clip from a bad voice is a mislabelled positive.
+At 1/42 of the voice list each that is ~2.4% of the Kokoro corpus per voice, **~14%
+for the six**, across plain and run-on alike since both draw from the same list.
+
+Together with the uppercase bug below, roughly **a fifth of the synthetic positives
+in every run to date were not the wake word.**
+
+### Duration is not a proxy for pronunciation - it failed twice
+
+Worth recording because it was tried twice and confidently gave the wrong answer both
+times:
+
+| | duration | vs median | verdict |
+|---|---:|---:|---|
+| `bm_fable` | 1121 ms | **1.00x** | **wrong** - the single most median-length voice in the set |
+| `am_echo` | 1273 ms | 1.14x | **wrong**, inside the normal spread |
+| `af_alloy` | 1602 ms | 1.43x | wrong, and flagged |
+| `bf_lily` | 1520 ms | 1.36x | wrong, and flagged |
+| `af_v0sky` | 938 ms | 0.84x | fine |
+| `am_onyx` | 872 ms | 0.78x | fine |
+
+The same proxy also cleared "HEY SEEREE" as emphatic delivery when it was being
+spelled out (+12% duration). Two failures, opposite directions: it flagged correct
+voices and cleared incorrect ones. **Listening to all 42 takes a couple of minutes and
+is the only method that works.** Do it for every new wake word.
+
+None of the eleven `v0` variants were rejected, and no rejected voice has a `v0` twin
+that was also rejected, so the fault is per-voice rather than per-speaker-family.
+
+`--exclude-voices` adds to the list at the command line for a wake word with no
+built-in entry.
+
+---
+
+## Corpus bug, runs 1-12: a sixth of the plain positives were spelled out
+
+`positive_texts` contained `wake_word.upper()`. Kokoro renders "HEY SEEREE" as
+**spelled-out letters** - "hey S-E-E-R-E-E" - and every run so far labelled that as
+the wake word. With 6 text slots cycled evenly, that is **~1/6 of plain positives**,
+or ~8% of all Kokoro positives once run-ons are counted. Removed.
+
+It is uppercase on the *invented* word that does it. "HEY seeree" measures 0.031 from
+plain in embedding space (nothing happens); "hey SEEREE" measures 0.030 from
+"HEY SEEREE" (both spell it out). A real word in caps is fine - the wake word is not a
+real word, which is exactly why it works as a wake word.
+
+**Caught by ear. Two measurements had already looked at it and both said the wrong
+thing**, which is the part worth keeping:
+
+* **Duration**: 1083 ms against 965 ms, +12%. Spelling six letters should have
+  doubled it. The change was read as emphatic delivery. A 12% difference was never
+  strong enough to conclude anything, and it was used to *rule out* spelling.
+* **Embedding distance**: 0.535 from plain - about the same as a completely different
+  voice (0.70) and far above one speed-grid step (0.29). Read as "excellent
+  diversity". It actually meant "this is not the same phrase."
+
+**A large embedding distance cannot tell useful variety from a different utterance.**
+Both look identical to that metric. It is a *screening* tool at best, and anything
+added to `positive_texts` has to be listened to before it goes in.
+
+The eval corpus is unaffected - `generate_positives.py` and `generate_negatives.py`
+never used `.upper()` - so every gate and false-accept number in this file was scored
+on correctly-pronounced audio. Only training positives were contaminated.
+
+Unknown how much this cost. It is a mislabelled positive, so the model was taught
+that a spelled-out variant is the wake word, which should hurt precision rather than
+recall. It does not obviously explain the child gap, which has a sufficient cause
+already.
+
+### Replacement list
+
+`.upper()` gone. `.lower()` gone too - it is the same string as `wake_word` for a
+lowercase wake word, so 6 slots only ever held 5 strings. `.title()` gone as useless:
+0.027 / 0.053 from plain, indistinguishable. What remains is punctuation, which moves
+prosody without touching pronunciation - measured af_bella / am_adam against plain:
+
+| variant | distance |
+|---|---:|
+| `hey seeree,` | 0.437 / 0.344 |
+| `hey seeree!` | 0.291 / 0.201 |
+| `hey seeree...` | 0.264 / 0.523 |
+| `hey seeree!!` | 0.158 / 0.232 |
+| `hey seeree?` | 0.105 / 0.304 |
+| `hey seeree.` | 0.086 / 0.294 |
+
+Seven slots, seven distinct strings, all pronounced correctly. Scale for reading those
+numbers: a different voice is ~0.70, one step of `PLAIN_SPEED_GRID` is ~0.29, and a
+plain re-request of the identical prompt is ~0.05 (Kokoro is not deterministic, but
+repeats carry ~1/6 the novelty of one speed step - which is why raising
+`--samples-per-voice` is the weakest diversity lever available).
+
+---
+
 ## Run 13 (staged, not yet trained): child-range positives
 
 Implements lever 1 from run 12. **Nothing below is measured** - it is what was built
