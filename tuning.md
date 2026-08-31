@@ -16,25 +16,32 @@ Twelve runs against "hey seeree", every number measured rather than estimated.
     --max-negative-weight 2000    4000 traded detection for precision, no net gain
     --samples-per-voice 300
     --augmentation-rounds 3
+    --child-fraction 0.5          pitch/formant-shifted copies; the child lever
     RUNON_TAIL_MS = (150, 300)    trailing margin; must not reach zero
     PLAIN_SPEEDS  = (0.7, 1.6)
+    MISPRONOUNCING_VOICES         6 of 42 voices say the wrong word - exclude by ear
 
-**Ship candidate: `9a938fb`** — see the batched-TTS section for why it is preferred
-over `eea1c56` and `41c5cbc`, which it does not measurably beat. Tune the threshold
-before deploying; 0.5 is the wrong operating point.
+**Ship candidate: `68b37db`** (run 13) — the first model that detects both speakers.
+It does not beat `9a938fb` on the adult, but `9a938fb` reads 33% on the 4-year-old at
+threshold 0.5 and `68b37db` reads 67%. Tune the threshold before deploying; 0.5 is the
+wrong operating point, and more so for this model than its predecessors.
 
-Best models, on recordings made after they trained, at 8/32 adversarial false
-accepts. **These are jay-only numbers, and jay is an adult.** The second speaker
-(ryan, aged 4) reads 24% plain on the same models - see run 12:
+Best models at 8/32 adversarial false accepts, on held-out recordings, **scored per
+speaker — never pooled**:
 
-| | |
-|---|---|
-| held-out plain (35 clips) | **99%** |
-| held-out run-on (57 clips) | **95%** |
-| median latency from end of speech | ~50 ms |
+| plain / run-on | jay, adult (35/57) | ryan, age 4 (6/14) | ryan plain at thr 0.5 |
+|---|---|---|---|
+| `68b37db` run 13 | 97% / 86% | 83% / 79% | **67%** |
+| `9a938fb` run 11 | **100% / 91%** | 83% / 79% | 33% |
+| `2213187` run 12 | 97% / 84% | 50% / 79% | 17% |
 
-Where it started: 63% plain, **5%** run-on, 13/20 false accepts on "hey serious",
-220 ms latency, 83 minutes per run (now ~16).
+Ryan's set is 6 plain and 14 run-on clips - small enough that one clip is 17 points.
+See run 13 for why the result is still credible.
+
+Where it started, on jay: 63% plain, **5%** run-on, 13/20 false accepts on "hey
+serious", 220 ms latency, 83 minutes per run (now ~16). On ryan, before run 13: 24%.
+
+Never solved: `extend` false accepts, 6/32 across every run since run 6.
 
 ## Four rules, learned the expensive way
 
@@ -170,11 +177,85 @@ repeats carry ~1/6 the novelty of one speed step - which is why raising
 
 ---
 
-## Run 13 (staged, not yet trained): child-range positives
+## Run 13: `68b37db` — child-range positives. It worked.
 
-Implements lever 1 from run 12. **Nothing below is measured** - it is what was built
-and what it should do, written down before the run so the prediction can be wrong on
-the record.
+**The first run scored per speaker, and the first to move the child number.** The
+prediction written before it ran was: ryan moves off 24%, jay does not regress,
+`extend` could go either way. All three held.
+
+### Ryan, age 4 — held out, 6 plain / 14 run-on
+
+| adv FA | `68b37db` | `2213187` | `9a938fb` |
+|---|---:|---:|---:|
+| 6/32 | **67** / 79 | 33 / 79 | 50 / 79 |
+| 8/32 | **83** / 79 | 50 / 79 | 83 / 79 |
+| 10/32 | **100** / **93** | 83 / 86 | 83 / 86 |
+| at threshold 0.5 | **67%** / 79% | 17% / 79% | 33% / 64% |
+
+Plain detection at 0.5 goes **17-33% -> 67%**, and every matched-precision point
+improves or ties. Run-on reaches 93% where both predecessors sat at 86%.
+
+**n=6 on ryan plain, so one clip is 17 points.** That is far too small to trust on its
+own. What makes it credible is that it is not one number: all six matched-FA points
+move the same way, run-on (n=14) moves with it, and the effect size is larger than the
++/-10 point band replicates established. Treat it as "the lever works", not as "ryan is
+now at 100%".
+
+### Jay, adult — held out, 35 plain / 57 run-on
+
+| adv FA | `68b37db` | `2213187` | `9a938fb` |
+|---|---:|---:|---:|
+| 2/32 | 57 / 33 | **83** / **47** | 77 / 46 |
+| 4/32 | 83 / 51 | **89** / 58 | 83 / **60** |
+| 6/32 | 97 / **86** | 97 / 82 | **100** / 82 |
+| 8/32 | 97 / 86 | 97 / 84 | **100** / **91** |
+| 10/32 | **100** / **98** | 100 / 96 | 100 / 96 |
+
+**No regression where it matters, and a real one where it does not.** At the 6-10/32
+operating points anyone would ship, jay is unchanged within noise. At 2-4/32 - far
+tighter than any usable threshold - `68b37db` is clearly worse (57/33 against 83/47).
+Its score distribution sits lower, so cutting at very high thresholds loses more. Not
+a reason to reject the model, but it is the one genuine cost, and it is recorded here
+rather than rounded away.
+
+**The additive design held.** Adding ~14k child-range clips did not buy ryan by
+spending jay, which was the specific risk.
+
+### Everything else unchanged
+
+| | `68b37db` |
+|---|---|
+| alignment | peak 160 ms, band 80-240 ms - ties the tightest ever measured |
+| `extend` + `hey_other` | 6/32, same as every run since run 6 |
+| ordinary negatives | 0/68 - general, command, other_ww, running all zero |
+| latency | 91 ms median, 162 ms p90, inside the 120 ms gate |
+
+The shifted clips are new positive material near the phrase, so `extend` could
+plausibly have moved. It did not, in either direction.
+
+### This is a lower bound
+
+`68b37db` still contains **both** corpus bugs found afterwards: `wake_word.upper()`
+spelling out the wake word, and six voices mispronouncing it. Together roughly **a
+fifth of the synthetic positives in this run were not the wake word.** Whatever VTLP
+is worth, it is worth at least this much while a fifth of the corpus is mislabelled.
+
+### Where that leaves the ship candidate
+
+**`68b37db`.** It is the first model that detects both speakers: at 8/32 it reads
+97/86 on jay and 83/79 on ryan, where `9a938fb` reads 100/91 and 83/79 but collapses
+to 33% on ryan plain at threshold 0.5. On jay alone `9a938fb` still has a marginal
+edge at 8/32; on the household as a whole it is not close.
+
+Threshold matters more than usual here. `68b37db` needs a lower one than its
+predecessors to reach the same precision - tune it against a long recording of the
+room before deploying, and do not assume 0.5.
+
+---
+
+## Run 13 as it was staged (kept for the prediction)
+
+Written before the run, unchanged:
 
 `add_child_range_copies()` in `train.py` adds pitch/formant-shifted copies of the
 Kokoro positives after generation and before trimming. `--child-fraction` (default
