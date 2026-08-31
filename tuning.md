@@ -6,7 +6,7 @@ measurement said - including the predictions that turned out wrong. It is kept i
 that form deliberately: several conclusions here were reversed by later runs, and the
 reasoning is worth more than the conclusions when picking the next lever.
 
-Eleven runs against "hey seeree", every number measured rather than estimated.
+Twelve runs against "hey seeree", every number measured rather than estimated.
 
 ## Current settings and results
 
@@ -24,7 +24,8 @@ over `eea1c56` and `41c5cbc`, which it does not measurably beat. Tune the thresh
 before deploying; 0.5 is the wrong operating point.
 
 Best models, on recordings made after they trained, at 8/32 adversarial false
-accepts:
+accepts. **These are jay-only numbers, and jay is an adult.** The second speaker
+(ryan, aged 4) reads 24% plain on the same models - see run 12:
 
 | | |
 |---|---|
@@ -35,7 +36,7 @@ accepts:
 Where it started: 63% plain, **5%** run-on, 13/20 false accepts on "hey serious",
 220 ms latency, 83 minutes per run (now ~16).
 
-## Three rules, learned the expensive way
+## Four rules, learned the expensive way
 
 **1. Score on recordings made AFTER the model trained.** `train.py` trains on
 everything under `my_real_samples/`, so pointing an evaluation there reports training
@@ -54,11 +55,298 @@ scoring 100% on synthetic "wake word + command" clips detected 46% of real ones.
 earlier splice-based test showed no problem at all. The synthetic speed sweep, at six
 voices per point, measures which voices are hard rather than which speeds.
 
+**4. Score every speaker separately, and never pool them.** Added after run 12, which
+found the second speaker - a 4-year-old - at 24% detection while the pooled-by-absence
+headline said 99%. The holdout had no child clips in it for eleven runs, so the gap
+could not appear. A speaker missing from the holdout does not make the number worse,
+it makes the number meaningless.
+
 The one thing never solved: **false accepts on close phonetic neighbours** ("hey
 serious", "hey series"). 13/20 at the start, 6-8/32 since, and no lever tried has
 moved it much. Real recordings of near-misses, spoken by the actual users in the
 actual room, are the untried idea most likely to help - by symmetry with real
 positives, which turned out to matter far more than their 4% share of the corpus.
+
+---
+
+## Run 13 (staged, not yet trained): child-range positives
+
+Implements lever 1 from run 12. **Nothing below is measured** - it is what was built
+and what it should do, written down before the run so the prediction can be wrong on
+the record.
+
+`add_child_range_copies()` in `train.py` adds pitch/formant-shifted copies of the
+Kokoro positives after generation and before trimming. `--child-fraction` (default
+0.5) sets how many clips get one; `--child-fraction 0` restores the old corpus.
+
+* **Additive, not substitutive.** The adult clips all survive, so jay's density is
+  untouched. Substituting would have bought ryan by spending jay, which run 10's
+  result argues against.
+* **Ratio per voice sex**, straight from the listening test: female 1.20-1.35x
+  (-> 272-306 Hz, straddling ryan's 291), male 1.15-1.30x (-> 152-172 Hz, the gap
+  between jay and ryan). Male voices are not asked to reach a child, because above
+  1.30x they are audibly chipmunk and that is a cue the model would learn instead of
+  the phrase.
+* **Kokoro clips only.** Ryan needs no shifting; jay is male, so shifting him reaches
+  a teen range that ~15 Kokoro male voices already cover far more cheaply.
+* **Duration is preserved** - resample by R, then WSOLA back to the original length,
+  so the shift changes the speaker and not the delivery speed. Speed is already an
+  independent axis (`PLAIN_SPEED_GRID`) and conflating the two would confound them.
+* The voice is now in the Kokoro filename (`kokoro_af_bella_<uuid>.wav`), which is
+  how the pass knows a clip's sex.
+
+Verified before committing: F0 lands where intended (`af_bella` 1.31x -> 296 Hz,
+`am_adam` 1.25x -> 168 Hz), duration is preserved to the sample, real clips are
+skipped, and the WSOLA output matches `ffmpeg -af asetrate,aresample,atempo` on the
+same clips to within the F0 estimator's resolution. scipy only - the trainer image has
+no ffmpeg.
+
+**Prediction.** Ryan's held-out plain detection moves from 24%; jay's 97% does not
+regress. `extend` false accepts are the thing to watch: the shifted clips are new
+positive material near the phrase, so they could plausibly move that number either
+way. If ryan improves and jay drops, the additive design failed and the fraction is
+the lever.
+
+**Score it per speaker.** A pooled number would hide exactly the failure this run
+exists to fix.
+
+---
+
+## Run 12: `2213187` — the model is adult-only, and eleven runs of notes never said so
+
+The run itself is minor. What it exposed is not: **the second speaker is a 4-year-old
+child and the model detects him 24% of the time.** Every headline number in this file
+is a measurement of one adult male. Skip to "the ryan holdout arrived" for that; the
+first two sections are how the blind spot stayed hidden.
+
+The code diff is nothing: `git diff 9a938fb 2213187` touches only `run-training.sh`
+and the post-training reporting in `train.py` (the freshness check that replaced the
+exit-code check, since openwakeword exits 1 on the tflite conversion after the .onnx
+is already written). The corpus is what moved. `my_real_samples/` was re-scp'd to the
+training VM with 17 new clips of **ryan**, recorded 20:18-20:23 on 30 Aug, half an
+hour before this model was written:
+
+| | `9a938fb` | `2213187` |
+|---|---:|---:|
+| jay | 160 | 160 |
+| ryan | 42 | **59** |
+| jen | 8 | 8 |
+| total real clips | 210 | **227** (+8%) |
+
+At `--real-copies 10` that is +170 weighted clips, and ryan's share of the real corpus
+goes 20% -> 26%.
+
+### The first pass at evaluating it was jay-only, so it measured none of that
+
+At the time this run was first scored, `my_real_samples_holdout/` held 35 plain and 57
+run-on clips, **all of jay**. `my_real_samples_holdout/ryan/` and `ryan_runon/` existed
+and were empty - created 20:21 on 30 Aug, mid-session, and not filled until the next
+day. Every number in `compare_models.py` and `eval_model.py` defaults to the jay set,
+so the first reading added data from one speaker and scored it entirely on another,
+and reported "no measurable difference" as though that meant something.
+
+Keeping the jay table below because it is still the correct jay result, and because
+the failure mode is worth naming: **a holdout that is missing a speaker does not
+return a worse number, it returns a confident irrelevant one.**
+
+| | `9a938fb` | `2213187` |
+|---|---:|---:|
+| plain / run-on at threshold 0.5 | 97% / **74%** | 97% / **82%** |
+| plain / run-on at 6/32 FA | **100** / 82 | 97 / 82 |
+| plain / run-on at 8/32 FA | **100** / **91** | 97 / 84 |
+| plain / run-on at 10/32 FA | 100 / 96 | 100 / 96 |
+| alignment peak / band | 160 ms / 80-240 ms | 160 ms / **80-320 ms** |
+| `extend` + `hey_other` | 6/32 | 6/32 |
+| ordinary negatives | 0/68 | 0/68 |
+| median latency from speech end | ~50 ms | 115 ms |
+
+Identical at matched precision. **That is the expected result of adding another
+speaker's clips and scoring on jay** - roughly neutral, which is what it read. It is
+not evidence that the extra ryan data did nothing; it is evidence that this test
+cannot answer the question. The one thing it does establish is that ryan's clips did
+not *cost* anything on jay, and that the negatives and alignment are unchanged.
+
+The 8-point run-on gap at threshold 0.5 collapsing to nothing at matched precision is
+still worth logging as **rule 2 again** - third time measured (run 10 vs `41c5cbc`,
+`9a938fb` vs `41c5cbc`, now this).
+
+Gates, for the record: `extend` 6/32 (19%) fails the 6% gate, as every model here
+does; plain 34/35 fails the 98% gate by one clip (`hey_seeree_0028`, scored 0.120 -
+it also reads as the weakest clip for `9a938fb`). Both are the known standing
+failures, not regressions.
+
+### The ryan holdout arrived, and it is the worst result in this file
+
+Scored 31 Aug on ryan clips **no model has seen**: 25 plain (6 from
+`my_real_samples_holdout/ryan`, plus 19 recorded 31 Aug that have since been added to
+training - so this exact comparison is valid for these two models only) and 14 run-on
+from `my_real_samples_holdout/ryan_runon`. Checked for leakage first: zero
+byte-identical clips shared with `my_real_samples/`.
+
+| at matched adv FA | `2213187` plain/run-on | `9a938fb` plain/run-on |
+|---|---:|---:|
+| 6/32 | 28 / 79 | 24 / 79 |
+| 8/32 | 40 / 79 | **64** / 79 |
+| 10/32 | 56 / 86 | **72** / 86 |
+| 12/32 | 64 / 86 | **80** / 86 |
+
+**Ryan plain reads 24% where jay reads 97%, on the same model at the same threshold.**
+Even at 10/32 false accepts - already past the operating point anyone would ship - it
+is 56-72%. Ryan run-on is much healthier at 79-86%, so the failure is specific to the
+phrase spoken alone.
+
+The extra 17 clips did not fix it, and `2213187` is if anything *behind* `9a938fb`
+here. n=25 is small, but not small enough to explain a 70-point gap.
+
+### Why: ryan is four years old, and nothing in the corpus sounds like him
+
+This is the explanation, and it was sitting outside the data the whole time. **Ryan is
+a 4-year-old child.** Every other voice the model has ever seen is an adult:
+
+* the ~30 distinct Kokoro English voices are all adult, and they are the overwhelming
+  majority of the positive set
+* jay is an adult male, and 160 of the 227 real clips
+* openwakeword's `PitchShift` is **-3 to +3 semitones at p=0.25**
+  (`openwakeword/data.py:628`)
+
+Measured F0, autocorrelation over voiced frames, median per clip:
+
+| | median F0 | vs ryan |
+|---|---:|---:|
+| ryan (age 4), n=78 | **291 Hz** (p10 254, p90 378) | - |
+| jen, n=8 | 269 Hz | -1.3 st |
+| jay, n=160 | 153 Hz | -11.1 st |
+| Kokoro `am_adam` | 132 Hz | **-13.6 st** |
+| Kokoro `af_bella` | 227 Hz | -4.3 st |
+
+The augmentation covers **±3 semitones of a 13.6-semitone gap, a quarter of the time**.
+So the model was asked to fit a speaker whose fundamental sits outside the range of
+almost everything else in the corpus, with 59 clips against thousands, and it
+declined. 34% on his own training clips is what that looks like.
+
+**Correction to an earlier draft of this section:** it claimed `PitchShift` is
+formant-preserving and therefore the wrong tool. That is wrong. `torch_pitch_shift`
+(what `torch_audiomentations.PitchShift` calls) is a phase-vocoder `TimeStretch`
+followed by `Resample` - `torch_pitch_shift/main.py:156-168` - which is exactly the
+resample trick with the duration change undone. It moves formants with pitch, same as
+resampling. **The binding constraint is the range and probability, not the mechanism.**
+
+The real limitation is subtler: pitch and formants do not scale together between an
+adult and a child. Ryan's F0 is 2.20x `am_adam`'s, but a 4-year-old's vocal tract is
+only ~1.4-1.5x shorter, so formants should move ~1.5x. A single resample ratio cannot
+satisfy both - R=2.2 gets the pitch right and overshoots the formants (chipmunk), R=1.5
+gets the formants right and leaves the pitch 6 semitones low. Also unreproduced by any
+resampling: a 4-year-old's less precise articulation and much larger token-to-token
+variability.
+
+### It is not a recording problem, and not a speaking-rate problem
+
+Both were tested before the explanation arrived, and both are dead - worth keeping,
+because they rule out the boring causes and leave the speaker gap as the whole story:
+
+| | jay train | ryan train | jay holdout | ryan holdout |
+|---|---:|---:|---:|---:|
+| median peak | 0.09 | 0.08 | 0.17 | 0.20 |
+| median RMS | 0.0139 | 0.0175 | 0.0285 | 0.0284 |
+| median SNR | 24.7 dB | 24.8 dB | 26.5 dB | 26.6 dB |
+| clipped clips | 0 | 0 | 0 | 0 |
+
+Level, noise floor and clipping are indistinguishable. `check_alignment.py` on the
+ryan holdout gives lead 20 ms, trail 0 ms, speech-end-to-window-end 0 ms - the same
+placement as the trained ryan clips, so the segmenter is not cutting them badly.
+
+Speaking rate looked promising - ryan's *training* clips have an 880 ms median against
+jay's 715 ms, and real clips get background noise, RIR, EQ, pitch shift and gain from
+openwakeword's augmentation but **never a time-stretch**, so delivery rate is the one
+axis never varied for real speech. It does not hold up. Ryan's unseen clips have a
+720 ms median, matching jay's 715 ms, and score badly in *every* duration bucket:
+
+| clip duration | jay train det@0.5 | ryan unseen det@0.5 |
+|---|---:|---:|
+| 0-650 ms | 72% (n=36) | 12% (n=8) |
+| 650-800 ms | 96% (n=80) | 38% (n=8) |
+| 800-1000 ms | 88% (n=16) | 25% (n=4) |
+| 1000+ ms | 82% (n=28) | 20% (n=5) |
+
+(An earlier version of this test streamed the raw clips instead of padding them into
+the 2 s window the way `eval_model.py` does, and reported jay at 18%. Any scorer that
+does not reproduce `eval_model`'s 88% on jay-train is measuring its own padding.)
+
+### The measurement that makes it unambiguous
+
+`2213187` detects **34% (20/59) of the ryan clips it trained on**, against **88%
+(140/160) of jay's**. Not a generalisation gap - it never fit the training data for
+this speaker, which is exactly the signature of a voice outside the corpus
+distribution rather than one merely under-represented in it.
+
+That reframes the whole file. Every headline number above - "99% plain, 95% run-on" -
+is **jay-only, and adult-only**. Nobody noticed because the holdout had no second
+speaker in it, and no run to date has had a child voice to hold out.
+
+### What to do next
+
+The problem is now well-posed: this is a child-speech coverage problem, not a
+hyperparameter problem. In rough order of expected value:
+
+1. **Vocal-tract-length perturbation across the whole positive corpus.** Resample by
+   R, then restore the duration - equivalently, widen `PitchShift` well past +3
+   semitones, since that is the same operation. The point is the *range*: the corpus
+   needs positives sitting at 250-350 Hz, and today it has almost none. Applies to
+   every Kokoro clip, not just the 227 real ones, so it is the only lever that
+   reaches the whole corpus.
+
+   Audible demo in `vtlp_demo/` (gitignored, regenerate from the run 12 commands).
+   `am_adam` at R=1.15/1.30/1.50/1.80/2.20 and `af_bella` at R=1.15/1.28/1.45, each
+   as `_a_faster` (resample only, duration shrinks) and `_b_samelength` (duration
+   restored with `atempo` - the variant an augmentation should use), plus
+   `zz_REAL_ryan_age4.wav` and `zz_REAL_jay_adult.wav` to compare against:
+
+   | clip | F0 | vs ryan |
+   |---|---:|---:|
+   | `am_adam_R1.00_original` | 132 Hz | -13.6 st |
+   | `am_adam_R1.50_b_samelength` | 205 Hz | -6.0 st |
+   | `am_adam_R2.20_b_samelength` | 296 Hz | +0.3 st |
+   | `af_bella_R1.28_b_samelength` | 286 Hz | -0.3 st |
+   | `zz_REAL_ryan_age4` | 291 Hz | 0 |
+
+   **Listening test (jay, 31 Aug) - this is the design constraint:**
+
+   * `af_bella_R1.28_b_samelength` is **the closest thing to ryan** in the set.
+   * male voices "sound like teenagers up to R1.30 and useless above that (chipmunk)".
+
+   So the ratio must be **conditioned on the voice's sex**, not applied globally. One
+   global range either leaves the female voices short of ryan or drives the male
+   voices into artefact:
+
+   | voice class | usable R | resulting F0 | what it covers |
+   |---|---|---|---|
+   | `af_`/`bf_` (~227 Hz) | **1.20-1.35** | 272-306 Hz | ryan directly |
+   | `am_`/`bm_` (~132 Hz) | **1.15-1.30** | 152-172 Hz | the jay-to-ryan gap, not ryan |
+
+   Male voices are worth stretching anyway - not to reach a 4-year-old, which they
+   cannot do cleanly, but to stop 132-153 Hz being the only place the corpus has any
+   density. Above R=1.30 they are artefact and would teach the model chipmunk, which
+   is the run 5 failure mode (training on a cue that is not the target).
+2. **Far more clips of ryan**, and accept that a 4-year-old needs more of them than an
+   adult does - delivery varies much more token to token at that age, so the corpus
+   has to cover that variance rather than a single canonical rendition.
+3. **Per-speaker `--real-copies` weighting.** The copy count is global today
+   (`train.py:744`), so 160 jay clips outweigh 59 ryan ones 2.7:1 in a corpus where
+   ryan is the speaker at risk. This is a small change and worth doing alongside 1.
+4. **Keep a per-speaker holdout permanently** and score every run on each speaker
+   separately, never pooled. Pooling would have hidden this indefinitely.
+5. The `extend` idea (real near-miss recordings) drops below all of this in priority.
+
+**A separate model for ryan is also legitimate** if 1-3 do not close the gap.
+Detecting one wake word across an adult male and a 4-year-old with one 100k-parameter
+model is a genuinely harder problem than any run in this file was set up to solve, and
+two models with an OR gate costs one extra inference per frame.
+
+**Ship candidate is unchanged: `9a938fb`** - but now for a weaker reason than before.
+On jay the two are indistinguishable, `9a938fb` has the tighter firing band, and
+there is no measurement either way on ryan. If the point of the extra clips was to
+improve ryan, `2213187` is the better bet on priors and simply has not been scored.
+`2213187` was not converted to tflite pending that.
 
 ---
 

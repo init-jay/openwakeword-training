@@ -22,12 +22,14 @@ import threading
 import time
 import uuid
 import warnings
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
 import requests
 import scipy.io.wavfile
 import yaml
+from scipy.signal import resample_poly
 from tqdm import tqdm
 
 warnings.filterwarnings("ignore", message="Reached EOF prematurely")
@@ -139,6 +141,32 @@ PLAIN_SPEED_GRID = [round(PLAIN_SPEEDS[0] + i * PLAIN_SPEED_STEP, 2)
 # The cost is latency, which tracks margin closely and is at 83 ms against a 120 ms
 # gate. There is roughly one more step of headroom, for diminishing returns.
 RUNON_TAIL_MS = (150.0, 300.0)
+
+# Vocal-tract-length perturbation, per voice sex.
+#
+# Run 12 measured the second speaker - a 4-year-old - at 24% detection against 97%
+# for the adult, and 34% on his OWN training clips. He was 26% of the real corpus,
+# so this is not under-representation: his fundamental sits outside the range of
+# almost everything the model has ever seen. Measured medians: ryan 291 Hz, jen
+# 269 Hz, jay 153 Hz, Kokoro am_adam 132 Hz, af_bella 227 Hz. openwakeword's own
+# PitchShift is +/-3 semitones at p=0.25 against a 13.6-semitone gap, so it cannot
+# close it - and it is the same resample-plus-stretch operation as this, just with
+# a range a quarter the size (torch_pitch_shift/main.py:156-168).
+#
+# The ratios are per sex because one global range serves neither. A listening test
+# on vtlp_demo/ (run 12): af_bella at 1.28 is the closest thing to ryan in the set,
+# while male voices "sound like teenagers up to R1.30 and useless above that
+# (chipmunk)". Male voices therefore cover the 152-172 Hz gap between the two real
+# speakers rather than reaching a child, which they cannot do without artefact -
+# and training on an artefact teaches the artefact.
+#
+# f -> 272-306 Hz, straddling ryan. m -> 152-172 Hz, the jay-to-ryan gap.
+CHILD_STRETCH = {"f": (1.20, 1.35), "m": (1.15, 1.30)}
+
+# These clips are ADDED to the corpus, not substituted into it. Substituting would
+# thin out adult coverage in proportion, which is the trade run 10 warns about:
+# real-clip density drives the result, so buying ryan by spending jay is not a win.
+CHILD_STRETCH_FRACTION = 0.5
 
 # Confusable negatives, per wake word.
 #
@@ -569,8 +597,10 @@ def generate_kokoro_samples(pool: "KokoroPool", voices: list, output_dir: Path,
         for data, _ in results:
             if data is None:
                 continue
+            # The voice goes in the name so add_child_range_copies can pick a
+            # stretch ratio from its sex, and so a bad voice can be traced later.
             scipy.io.wavfile.write(
-                str(output_dir / f"kokoro_{uuid.uuid4().hex}.wav"), 16000, data)
+                str(output_dir / f"kokoro_{voice}_{uuid.uuid4().hex}.wav"), 16000, data)
             written += 1
         return written
 
@@ -708,8 +738,8 @@ def generate_runon_samples(pool: "KokoroPool", voices: list, output_dir: Path,
         if data is None or not cut:
             return 0
         data = data[:cut + tail] if cut + tail < len(data) else data
-        scipy.io.wavfile.write(str(output_dir / f"runon_{uuid.uuid4().hex}.wav"),
-                               16000, data)
+        scipy.io.wavfile.write(
+            str(output_dir / f"runon_{voice}_{uuid.uuid4().hex}.wav"), 16000, data)
         return 1
 
     def render(job):
@@ -805,6 +835,126 @@ def copy_real_samples(wake_word: str, output_dir: Path, copies: int = 10) -> int
         print(f"  Found {sum(per_speaker.values())} real samples ({detail})")
     print(f"  Copied {count} real voice samples ({copies}x weight)")
     return count
+
+
+def time_stretch(x: np.ndarray, factor: float, sr: int = 16000,
+                 frame_ms: float = 30.0, seek_ms: float = 7.0) -> np.ndarray:
+    """Lengthen `x` by `factor` without moving pitch (WSOLA overlap-add).
+
+    Plain overlap-add at a fixed hop cuts frames at arbitrary phase and the
+    reassembled periods fight each other, which on a voiced phrase sounds like
+    added roughness. WSOLA slides each analysis frame within +/-`seek_ms` to the
+    offset that best correlates with what naturally followed the previous frame,
+    so consecutive frames stay in phase.
+
+    scipy only, deliberately: the trainer image has no ffmpeg (Dockerfile:7) and
+    torchaudio is not importable from the eval tools, so anything relying on either
+    could not be checked outside the container.
+    """
+    if abs(factor - 1.0) < 1e-3 or len(x) < int(sr * frame_ms / 1000) * 2:
+        return x.astype(np.float64)
+
+    x = x.astype(np.float64)
+    N = int(sr * frame_ms / 1000)
+    hop_in = N // 4
+    hop_out = max(1, int(round(hop_in * factor)))
+    seek = int(sr * seek_ms / 1000)
+    win = np.hanning(N + 1)[:N]
+
+    out = np.zeros(int(len(x) * factor) + 2 * N)
+    weight = np.zeros_like(out)
+    tail = None
+    i = 0
+    while True:
+        want = i * hop_in
+        offset = 0
+        if tail is not None:
+            lo, hi = max(0, want - seek), min(len(x) - N, want + seek)
+            if hi > lo:
+                seg = x[lo:hi + len(tail)]
+                if len(seg) >= len(tail):
+                    offset = lo + int(np.argmax(np.correlate(seg, tail, "valid"))) - want
+        start = want + offset
+        dest = i * hop_out
+        if start < 0 or start + N > len(x) or dest + N > len(out):
+            break
+        out[dest:dest + N] += x[start:start + N] * win
+        weight[dest:dest + N] += win
+        nxt = start + hop_out
+        tail = x[nxt:nxt + N // 2] if nxt + N // 2 <= len(x) else None
+        i += 1
+
+    covered = weight > 1e-6
+    out[covered] /= weight[covered]
+    return out[:int(len(x) * factor)]
+
+
+def vocal_tract_shift(data: np.ndarray, ratio: float, sr: int = 16000) -> np.ndarray:
+    """Raise F0 and formants by `ratio`, keeping the clip's original duration.
+
+    Resampling alone raises pitch and formants together - which is what a shorter
+    vocal tract does, and why this reaches a child voice where a formant-corrected
+    shift would not - but it also shortens the clip by the same factor. The stretch
+    puts the duration back, so the only thing that changed is the speaker, not the
+    delivery speed. Verified against `ffmpeg -af asetrate,aresample,atempo` on the
+    vtlp_demo/ clips: same F0 to within the estimator's resolution, and this keeps
+    the original length exactly where atempo drifts ~3%.
+    """
+    frac = Fraction(ratio).limit_denominator(100)
+    shifted = resample_poly(data.astype(np.float64), frac.denominator, frac.numerator)
+    out = time_stretch(shifted, float(ratio), sr=sr)
+
+    peak = np.abs(out).max()
+    if peak > 32767:
+        out = out * (32767 / peak)
+    return out.astype(np.int16)
+
+
+def add_child_range_copies(directory: Path, desc: str,
+                           fraction: float = CHILD_STRETCH_FRACTION) -> int:
+    """Add pitch/formant-shifted copies of the Kokoro clips in `directory`.
+
+    Only Kokoro clips are shifted, and the ratio comes from the voice's sex, which
+    is why the voice is in the filename. Real recordings are left alone: ryan needs
+    no shifting, and jay is male, so shifting him reaches the teen range that ~15
+    Kokoro male voices already cover far more cheaply than 160 clips of one speaker.
+
+    Copies are ADDED - see CHILD_STRETCH_FRACTION.
+    """
+    clips = [p for p in sorted(directory.glob("*.wav"))
+             if p.name.startswith(("kokoro_", "runon_"))]
+    if not clips:
+        return 0
+
+    written = 0
+    for clip in tqdm(clips, desc=desc, unit="clip"):
+        # kokoro_{voice}_{uuid}.wav -> af_bella; the sex is the voice prefix's
+        # second letter (af_/bf_ female, am_/bm_ male).
+        parts = clip.stem.split("_")
+        if len(parts) < 3 or len(parts[1]) != 2:
+            continue
+        sex = parts[1][1]
+        span = CHILD_STRETCH.get(sex)
+        if span is None:
+            continue
+        if np.random.random() >= fraction:
+            continue
+
+        try:
+            sr, data = scipy.io.wavfile.read(clip)
+        except Exception:
+            continue
+        if sr != 16000 or data.ndim != 1 or len(data) < 480:
+            continue
+
+        ratio = float(np.random.uniform(*span))
+        shifted = vocal_tract_shift(data, ratio)
+        scipy.io.wavfile.write(
+            str(directory / f"vtlp{ratio:.2f}_{clip.name}"), 16000, shifted)
+        written += 1
+
+    print(f"  Added {written} pitch/formant-shifted copies of {len(clips)} Kokoro clips")
+    return written
 
 
 def trim_silence(data: np.ndarray, sr: int = 16000, top_db: float = 40.0,
@@ -1037,6 +1187,12 @@ def main():
                         help="Fraction of positives where the phrase runs straight "
                              "into a command instead of being followed by quiet "
                              "(default: %(default)s). 0 disables them.")
+    parser.add_argument("--child-fraction", type=float,
+                        default=CHILD_STRETCH_FRACTION,
+                        help="Fraction of Kokoro positives that get an ADDITIONAL "
+                             "pitch/formant-shifted copy, to cover child and "
+                             "adolescent voices (default: %(default)s). 0 disables "
+                             "it, restoring the pre-run-12 adult-only corpus.")
     args = parser.parse_args()
 
     wake_word = args.wake_word
@@ -1119,6 +1275,16 @@ def main():
         generate_runon_samples(pool, kokoro_voices, pos_test,
                                runon_test, wake_word, "Kokoro run-on test",
                                reference, args.tts_workers, args.tts_batch)
+
+    # Before the real clips are copied in, so the shift only ever sees Kokoro
+    # output - and before trimming, so the shifted copies are trimmed like the rest.
+    if args.child_fraction > 0:
+        print("\n[Child-range copies]")
+        print(f"  Shifting {args.child_fraction:.0%} of Kokoro clips: "
+              f"female {CHILD_STRETCH['f'][0]}-{CHILD_STRETCH['f'][1]}x, "
+              f"male {CHILD_STRETCH['m'][0]}-{CHILD_STRETCH['m'][1]}x")
+        add_child_range_copies(pos_train, "VTLP positive train", args.child_fraction)
+        add_child_range_copies(pos_test, "VTLP positive test", args.child_fraction)
 
     print("\n[Real Voice]")
     real_count = copy_real_samples(wake_word, pos_train, args.real_copies)

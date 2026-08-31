@@ -38,3 +38,5 @@ __pycache__/
 .vscode/
 .idea/
 **.zip
+.venv-eval/
+vtlp_demo/
