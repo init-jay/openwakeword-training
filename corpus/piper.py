@@ -173,6 +173,18 @@ def generate_piper_samples(host, port, voices, output_dir: Path, texts, speeds,
     match the `kokoro_`/`runon_` prefixes add_child_range_copies looks for, so Piper
     clips are skipped by the child-range lever rather than mis-shifted - Piper voice
     names carry no sex marker to pick a ratio from. See corpus/augment.py.
+
+    VOICE IS THE OUTER LOOP ON PURPOSE - DO NOT REORDER. wyoming-piper holds exactly
+    one loaded voice in a module-level global and reloads it whenever a request names
+    a different one (handler.py:333-346, `if voice_name != _VOICE_NAME`). Iterating
+    texts or speeds outside voices would rebuild the InferenceSession on every single
+    request - and under --use-cuda that means a fresh CUDA session each time, which
+    is far more expensive than the synthesis itself.
+
+    The same global is why one server serves strictly one request at a time, and why
+    client concurrency measured as pure queueing (docker-compose.yml). Parallelism
+    has to come from separate instances, each with its own voice - which also means
+    sharding a multi-voice corpus BY VOICE across instances, never round-robin.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     jobs = [(v, s, t, sp)

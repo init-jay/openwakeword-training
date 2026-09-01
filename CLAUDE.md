@@ -73,14 +73,20 @@ python train.py --wake-word "hey cal"
 - Wyoming protocol over TCP (10200), not HTTP. Client is `corpus/piper.py`.
 - Start it explicitly - the trainer deliberately does not `depends_on` it:
   `docker compose up -d piper`
-- **ONE instance, unlike Kokoro's two.** Piper parallelises across cores (980% CPU
-  measured), so a second instance contends rather than scales - measured at 0.88x.
-  Client concurrency does not help either. See the note in `docker-compose.yml`.
-- `bench_tts.py` re-measures this for either engine. The numbers in that note came
-  from an emulated laptop and are a floor; re-run on the training server before
-  sizing anything. It needs numpy/scipy/tqdm, so the reliable way is inside the
-  trainer container (the host has python3 but not necessarily the deps), reaching
-  the service by its compose name rather than localhost:
+- **No `--use-cuda`: the GPU makes it 2.5x SLOWER** (17.45 clips/s CPU vs 7.00 with
+  CUDA, measured back to back). CUDA does initialise; ORT then splits the VITS graph,
+  leaving shape ops on CPU and paying 28 Memcpy nodes per inference. See
+  `docker-compose.yml` for the numbers and the ORT warnings.
+- **ONE instance, unlike Kokoro's two** - for two independent reasons. Within an
+  instance wyoming-piper holds one voice in a global, so requests serialise (latency
+  is exactly proportional to queue depth). Across instances they oversubscribe ORT's
+  thread pool: a second one measured **0.60x** on CPU, a 40% loss.
+- ~17.9 clips/s, slightly faster per clip than one Kokoro instance: 10k clips in
+  about 10 minutes. Not worth optimising further.
+- `bench_tts.py` re-measures this for either engine. It needs numpy/scipy/tqdm, so
+  the reliable way is inside the trainer container (the host has python3 but not
+  necessarily the deps), reaching the service by its compose name rather than
+  localhost:
 
 ```bash
 docker compose --profile bench up -d piper piper2   # piper2 only for --instances

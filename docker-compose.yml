@@ -17,31 +17,66 @@ x-kokoro: &kokoro
 # Built here rather than pulled: rhasspy/wyoming-piper is debian-slim with CPU
 # onnxruntime and cannot use a GPU at all. See Dockerfile.piper.
 #
-# ONE INSTANCE, NOT TWO - PIPER DOES NOT SCALE THE WAY KOKORO DOES. The note above
-# describes a single-threaded process using one core, where more instances scale
-# roughly linearly. Piper is the opposite: onnxruntime parallelises across cores, and
-# one instance under load measured 980% CPU - ten cores, the whole machine. Measured
-# back to back on the same box:
+# NO --use-cuda, DELIBERATELY: THE GPU MAKES PIPER 2.5x SLOWER. Measured on the
+# training server, same box, same benchmark, one flag apart:
 #
-#     1 instance,  2 client threads    11.23 clips/s
-#     2 instances, 1 thread each        9.84 clips/s   = 0.88x
+#     mode              CPU clips/s   RTF   med ms  |  CUDA clips/s   RTF   med ms
+#     sequential            17.45    22.2      56   |      7.00       8.8     149
+#     2 client threads      17.53    21.6     114   |      6.75       8.5     294
+#     4 client threads      16.85    21.4     236   |      6.86       8.6     601
+#     8 client threads      17.35    21.9     460   |      6.66       8.2    1199
 #
-# A second instance is SLOWER, because the two contend for the cores the first one
-# was already using. Client concurrency does not help either - throughput was flat
-# at ~7.5-8 clips/s from 1 to 8 threads while latency grew linearly (133 -> 996 ms),
-# which is queueing, not parallelism. So: one piper service, ~2 client threads.
+# CUDA was genuinely running - onnxruntime only logs this when the CUDA provider has
+# taken nodes:
 #
-# Those absolute numbers are a FLOOR, not a capacity plan: they were measured under
-# amd64 emulation on an ARM laptop, CPU-only. Re-measure on the training server with
-# bench_tts.py before sizing anything. The shape - parallel across cores rather than
-# single-threaded - is architectural and does carry over.
+#   [W:onnxruntime: transformer_memcpy.cc:111] 28 Memcpy nodes are added to the
+#   graph torch_jit for CUDAExecutionProvider. It might have negative impact on
+#   performance (including unable to run CUDA graph).
+#   [W:onnxruntime: session_state.cc:1316] Some nodes were not assigned to the
+#   preferred execution providers ... ORT explicitly assigns shape related ops to CPU
 #
-# `--use-cuda` IS A FLAG TO MEASURE, and the case for it is now BETTER than it looked.
-# The argument against was the Kokoro measurement, where the GPU sat at 21% because
-# the bottleneck was one Python thread. That does not apply here: Piper is genuinely
-# CPU-bound across every core, so offloading it could free the whole machine. Whether
-# it does is unmeasured - it needs a GPU host. A/B it by deleting the flag from
-# `command`; no rebuild needed.
+# The graph SPLITS. VITS carries a lot of dynamic-shape work (duration predictor,
+# length regulator) that ORT keeps on CPU, so every inference pays 28 host<->device
+# copies and loses CUDA graph capture. That costs more than the GPU compute saves.
+# The lesson generalises past Piper: a small model full of shape ops is the wrong
+# shape for GPU offload, and "it initialised" is not "it helped".
+#
+# Upstream does nothing about this, so there is no fix to wait for: piper1-gpl builds
+# the session with a bare `onnxruntime.SessionOptions()` (voice.py:195) and its only
+# CUDA tuning is `cudnn_conv_algo_search: HEURISTIC`, which is a session-init knob,
+# not a memcpy one. `--cuda` is documented as "Use GPU" with no caveat. The runtime
+# workarounds do not fit either - IOBinding only removes input/output transfers, not
+# the internal partition boundaries, and CUDA graph capture is what the memcpy nodes
+# already prevent. A real fix means re-exporting the model with foldable shape ops.
+#
+# Dropping the flag also removes a CUDA context that competed for the VRAM the
+# training run needs (Dockerfile:75-78), so corpus generation can now run DURING a
+# training run. The `deploy` GPU reservation below is kept only so the A/B can be
+# repeated by re-adding the flag - nothing uses the device now.
+#
+# ONE INSTANCE, NOT TWO - PIPER DOES NOT SCALE THE WAY KOKORO DOES. Two separate
+# mechanisms both say one, and they are worth keeping apart:
+#
+# 1. WITHIN an instance, requests serialise. Latency is exactly proportional to
+#    thread count (57 x 2 = 114 vs 115 measured, x8 = 456 vs 454), p90 within a few
+#    percent of the median. wyoming-piper holds one loaded voice in a module-level
+#    global (handler.py:333-346), so requests cannot overlap. Client threads only
+#    lengthen the queue - 17.9 clips/s sequential, 17.5 at 8 threads.
+#
+# 2. ACROSS instances, they fight for cores. A second instance measured 0.60x on CPU
+#    (10.79 vs 17.93 clips/s) - a 40% LOSS, not a plateau. onnxruntime sizes its
+#    intra-op thread pool to the machine's cores, so two instances oversubscribe it
+#    2:1 and lose the difference to context switching. Under CUDA the same test read
+#    1.04x, because there the instances were queueing on one GPU instead.
+#    piper1-gpl builds sessions with a bare SessionOptions() (voice.py:195), so
+#    intra_op_num_threads cannot be capped without patching it.
+#
+# So: one service, one or two client threads. If parallelism is ever genuinely
+# needed it has to be separate instances sharded BY VOICE, with thread counts capped
+# so they stop oversubscribing - see corpus/piper.py.
+#
+# For planning: ~17.9 clips/s is ~10 minutes for 10k clips, slightly FASTER per clip
+# than one Kokoro instance. Not worth optimising further.
 #
 # There is still a reason to prefer CPU. Dockerfile:75-78 requires
 # `docker compose stop kokoro kokoro2` before training, because their CUDA contexts
@@ -95,8 +130,7 @@ services:
     ports:
       - "10200:10200"
     command: ["--uri", "tcp://0.0.0.0:10200", "--data-dir", "/data",
-              "--download-dir", "/data", "--voice", "en_US-lessac-medium",
-              "--use-cuda"]
+              "--download-dir", "/data", "--voice", "en_US-lessac-medium"]
 
   # Second instance, for `bench_tts.py --instances 10200 10201` only. Behind a
   # profile so it is NOT started by `docker compose up` - on the box this was first
@@ -113,8 +147,7 @@ services:
     ports:
       - "10201:10200"
     command: ["--uri", "tcp://0.0.0.0:10200", "--data-dir", "/data",
-              "--download-dir", "/data", "--voice", "en_US-lessac-medium",
-              "--use-cuda"]
+              "--download-dir", "/data", "--voice", "en_US-lessac-medium"]
 
   trainer:
     build: .
