@@ -26,10 +26,15 @@ corpus that is free diversity and needs no special handling. For the audit it is
 why `--repeats` exists. It also means the corpus is not reproducible from a seed,
 which is already true of the Kokoro path (train.py sets no seed).
 
-UNTESTED AGAINST A LIVE SERVICE. Written from the Wyoming protocol as
-audit_voices.py implements it, but not yet run against a Piper server - there is
-none reachable from where this was written. Phase 0 in plan.md is where it gets
-exercised for the first time.
+EXERCISED AGAINST A LIVE SERVICE. piper_voices enumerated 2005 (voice, speaker)
+pairs across en_US/en_GB, and piper_render returns 16 kHz int16 at exact speed
+ratios (0.7000, 1.2501, 1.6001 measured on one clip). Not yet used to build a
+training corpus - that is --piper-fraction, staged as run 17 in tuning.md.
+
+MEASURE SPEED ON ONE CLIP, NOT ACROSS CALLS. Three separate renderings at 1.0/1.6/0.7
+gave 0.964 s / 0.501 s / 1.194 s, which looks wrong and is not: VITS samples
+durations per call, so the base clip differs every time. Stretch ratios are only
+meaningful against a single rendering.
 """
 
 import json
@@ -50,42 +55,176 @@ SR = 16000
 # MISPRONOUNCING_VOICES IN corpus/negatives.py, AND IT IS NOT OPTIONAL.
 #
 # Six of Kokoro's 42 voices say something other than "hey seeree" - ~14% of that
-# corpus mislabelled as positives. Piper has the same problem for the same reason
-# (the wake word is not a dictionary word, so g2p guesses), with one difference that
-# helps: Piper phonemises with espeak-ng per MODEL, not per speaker, so every speaker
-# inside one voice model shares a pronunciation and the unit to exclude is the whole
-# model (audit_voices.py:148).
+# corpus mislabelled as positives, undetected for eleven runs.
 #
-# EMPTY BECAUSE THE AUDIT HAS NOT BEEN COMPLETED. voice_audit_piper/ holds 252
-# renderings of 84 voices but no verdicts. Run audit_voices.py --tts piper to get a
-# ranked shortlist, LISTEN to the shortlist, and fill this in before generating a
-# corpus. An unaudited voice list is how ~14% mislabelled positives got into eleven
-# runs of tuning.md unnoticed.
+# THE EXCLUSION UNIT IS THE SPEAKER, NOT THE MODEL. The expectation going in was the
+# opposite: espeak-ng phonemises per model, so every speaker inside one voice gets
+# the same phoneme string, and it seemed to follow that they would all pronounce it
+# the same. The audit says otherwise - en_US-l2arctic-medium ranges from :ASI at 0%
+# to :PNV at 100%. Identical phonemes, different acoustic models, and intelligibility
+# varies with the speaker. Keys here are therefore "voice:speaker" wherever the audit
+# scored a speaker.
+#
+# Below is the 2026-09-02 audit of 96 voices against ASR consensus, everything under
+# 83% agreement. The transcripts make the distinction clear: excluded voices produce
+# a CONSISTENTLY different phrase ("his theory", four renderings running), while the
+# ones kept produce "hey siri" with an occasional slip, which is VITS sampling
+# durations per call rather than a pronunciation problem.
+#
+# en_US-l2arctic-medium is a non-native-speaker corpus and 7 of its 12 audited
+# speakers land here. That is not automatically a reason to exclude - accented
+# renderings of the CORRECT phrase are good training data, since real users have
+# accents. It is a reason here because the benefit cannot be measured: there is no
+# accented speaker in my_real_samples_holdout/, so the contamination is measurable
+# and the upside is not. Revisit if an accented speaker is ever recorded.
+#
+# WHAT THIS METHOD CANNOT SEE: the score is agreement with the consensus ACROSS
+# voices, so an error every voice shares is invisible. Every good voice here
+# transcribes as "Hey Siri"; if espeak-ng renders "seeree" as /'sIri/ rather than
+# /si:'ri:/, all 96 are uniformly wrong and all 96 score 100%. Check that by ear
+# against a real recording, once, per wake word - not from this table.
 MISPRONOUNCING_PIPER_VOICES: dict[str, list[str]] = {
-    "hey_seeree": [],
+    "hey_seeree": [
+        # < 50% - consistently a different phrase
+        "en_US-l2arctic-medium:ASI",            # 0%   "Here's your week" / "Peace, Yuri"
+        "en_GB-southern_english_female-low",    # 17%  "Hey, Sirius" / "Paisiru"
+        "en_US-l2arctic-medium:BWC",            # 17%  "His theory" x4
+        "en_US-l2arctic-medium:YBAA",           # 17%  "He's silly" / "History"
+        "en_US-l2arctic-medium:LXC",            # 33%  "his theory" x3
+        "en_US-l2arctic-medium:YKWK",           # 33%  "K-series" / "Here's theory"
+        # 50-67% - right more often than not, still ~1 bad clip in 3
+        "en_US-arctic-medium:slp",              # 50%  "He's a re" / "Hesiery"
+        "en_US-l2arctic-medium:HQTV",           # 50%  "History" / "Peace, Siri"
+        "en_US-l2arctic-medium:SVBI",           # 50%  "He's sorry" / "He's silly"
+        "en_US-arctic-medium:aup",              # 67%
+        "en_US-danny-low",                      # 67%
+        "en_US-l2arctic-medium:HKK",            # 67%  "STAE" / "A-Siri"
+        "en_US-l2arctic-medium:SKA",            # 67%  "Case Theory"
+        "en_US-l2arctic-medium:TXHC",           # 67%  "Hey, see you, Rhi!"
+    ],
 }
 
-# Voice sex, for the child-range lever (corpus/augment.py). Keys are Piper voice
-# names; for multi-speaker models the key may also be "voice:speaker".
+# Voice sex, for the child-range lever (corpus/augment.py). Keys are the voice name,
+# or "voice:speaker" for a multi-speaker model.
 #
-# ONLY NAMES THAT STATE IT ARE FILLED IN. The rest are deliberately absent rather
-# than guessed: an unknown voice is written piper_pu_* and simply does not receive a
-# pitch/formant-shifted copy, which costs coverage. Guessing instead would shift some
-# voices by the wrong range, and run 12 measured that male voices are "useless above
-# R1.30 (chipmunk)" - a shifted-wrong clip is worse than an absent one, because
-# training on an artefact teaches the artefact.
+# MEASURED, NOT LISTENED TO. Generated by measure_voice_f0.py from the 1.0x audit
+# clips: median F0 per voice, split at 185 Hz. Regenerate it for a new engine or a
+# new voice set rather than extending it by ear - 96 entries is more listening than
+# anyone will actually do, and skipping it silently costs the run-13 lever its reach.
 #
-# To extend it: listen, then add. The renderings are already in voice_audit_piper/.
+# Validated against the ten voices whose NAME states the answer - hfc_male 147 Hz,
+# hfc_female 268 Hz, northern_english_male 117 Hz, southern_english_female 248 Hz,
+# joe 116 Hz, ryan 162 Hz, amy 195 Hz, alba 190 Hz, jenny 205 Hz, lessac 231 Hz.
+# All ten agree with the split.
+#
+# THE 160-200 Hz BAND IS GENUINELY AMBIGUOUS (vctk:p239 184 Hz, p288 184, p293 182,
+# kathleen 177) and it does not matter much: sex here is only a proxy for F0, and the
+# two ratio ranges nearly coincide at the boundary. At 177 Hz the male range gives
+# 204-230 Hz and the female range 212-239 Hz. The ranges were calibrated against
+# am_adam at 132 Hz and af_bella at 227 Hz, so they are least distinguishable exactly
+# where the classification is least certain.
+#
+# A voice absent from this map is written piper_pu_* and gets NO child-range copy.
+# That is deliberate: run 12 measured male voices as "useless above R1.30
+# (chipmunk)", so a wrongly-shifted clip is worse than an absent one - training on an
+# artefact teaches the artefact.
 PIPER_VOICE_SEX: dict[str, str] = {
-    "en_GB-northern_english_male-medium": "m",
-    "en_GB-southern_english_female-low": "f",
-    "en_GB-alba-medium": "f",
-    "en_GB-jenny_dioco-medium": "f",
-    "en_US-amy-medium": "f",
-    "en_US-kathleen-low": "f",
-    "en_US-lessac-medium": "f",
-    "en_US-ryan-medium": "m",
-    "en_US-joe-medium": "m",
+    "en_GB-alan-low": "m",  # 98 Hz
+    "en_GB-alan-medium": "m",  # 93 Hz
+    "en_GB-alba-medium": "f",  # 190 Hz
+    "en_GB-aru-medium:01": "m",  # 111 Hz
+    "en_GB-aru-medium:02": "m",  # 104 Hz
+    "en_GB-aru-medium:03": "f",  # 207 Hz
+    "en_GB-aru-medium:04": "f",  # 226 Hz
+    "en_GB-aru-medium:05": "m",  # 120 Hz
+    "en_GB-aru-medium:06": "m",  # 145 Hz
+    "en_GB-aru-medium:07": "f",  # 214 Hz
+    "en_GB-aru-medium:08": "f",  # 215 Hz
+    "en_GB-aru-medium:09": "m",  # 149 Hz
+    "en_GB-aru-medium:10": "m",  # 154 Hz
+    "en_GB-aru-medium:11": "f",  # 215 Hz
+    "en_GB-aru-medium:12": "m",  # 129 Hz
+    "en_GB-jenny_dioco-medium": "f",  # 205 Hz
+    "en_GB-northern_english_male-medium": "m",  # 117 Hz
+    "en_GB-semaine-medium:obadiah": "m",  # 116 Hz
+    "en_GB-semaine-medium:poppy": "f",  # 229 Hz
+    "en_GB-semaine-medium:prudence": "f",  # 226 Hz
+    "en_GB-semaine-medium:spike": "m",  # 113 Hz
+    "en_GB-southern_english_female-low": "f",  # 248 Hz
+    "en_GB-vctk-medium:p239": "m",  # 184 Hz
+    "en_GB-vctk-medium:p241": "m",  # 114 Hz
+    "en_GB-vctk-medium:p253": "f",  # 221 Hz
+    "en_GB-vctk-medium:p273": "m",  # 150 Hz
+    "en_GB-vctk-medium:p286": "m",  # 141 Hz
+    "en_GB-vctk-medium:p288": "m",  # 184 Hz
+    "en_GB-vctk-medium:p293": "m",  # 182 Hz
+    "en_GB-vctk-medium:p294": "m",  # 167 Hz
+    "en_GB-vctk-medium:p299": "m",  # 159 Hz
+    "en_GB-vctk-medium:p307": "f",  # 229 Hz
+    "en_GB-vctk-medium:p334": "m",  # 95 Hz
+    "en_GB-vctk-medium:p362": "f",  # 210 Hz
+    "en_US-amy-low": "f",  # 208 Hz
+    "en_US-amy-medium": "f",  # 195 Hz
+    "en_US-arctic-medium:aew": "m",  # 121 Hz
+    "en_US-arctic-medium:aup": "m",  # 161 Hz
+    "en_US-arctic-medium:awb": "m",  # 139 Hz
+    "en_US-arctic-medium:axb": "f",  # 241 Hz
+    "en_US-arctic-medium:bdl": "m",  # 134 Hz
+    "en_US-arctic-medium:clb": "m",  # 180 Hz
+    "en_US-arctic-medium:fem": "m",  # 115 Hz
+    "en_US-arctic-medium:gka": "m",  # 142 Hz
+    "en_US-arctic-medium:ksp": "m",  # 134 Hz
+    "en_US-arctic-medium:rms": "m",  # 99 Hz
+    "en_US-arctic-medium:rxr": "m",  # 164 Hz
+    "en_US-arctic-medium:slp": "f",  # 238 Hz
+    "en_US-danny-low": "m",  # 133 Hz
+    "en_US-hfc_female-medium": "f",  # 268 Hz
+    "en_US-hfc_male-medium": "m",  # 147 Hz
+    "en_US-joe-medium": "m",  # 116 Hz
+    "en_US-kathleen-low": "m",  # 177 Hz
+    "en_US-kusal-medium": "m",  # 98 Hz
+    "en_US-l2arctic-medium:ASI": "m",  # 159 Hz
+    "en_US-l2arctic-medium:BWC": "m",  # 109 Hz
+    "en_US-l2arctic-medium:ERMS": "m",  # 109 Hz
+    "en_US-l2arctic-medium:HKK": "m",  # 115 Hz
+    "en_US-l2arctic-medium:HQTV": "f",  # 192 Hz
+    "en_US-l2arctic-medium:LXC": "f",  # 224 Hz
+    "en_US-l2arctic-medium:PNV": "f",  # 187 Hz
+    "en_US-l2arctic-medium:SKA": "f",  # 208 Hz
+    "en_US-l2arctic-medium:SVBI": "f",  # 237 Hz
+    "en_US-l2arctic-medium:TXHC": "m",  # 141 Hz
+    "en_US-l2arctic-medium:YBAA": "m",  # 158 Hz
+    "en_US-l2arctic-medium:YKWK": "m",  # 145 Hz
+    "en_US-lessac-high": "f",  # 220 Hz
+    "en_US-lessac-low": "f",  # 233 Hz
+    "en_US-lessac-medium": "f",  # 231 Hz
+    "en_US-libritts-high:p1271": "m",  # 134 Hz
+    "en_US-libritts-high:p1311": "m",  # 106 Hz
+    "en_US-libritts-high:p1779": "f",  # 224 Hz
+    "en_US-libritts-high:p2012": "m",  # 106 Hz
+    "en_US-libritts-high:p2085": "m",  # 181 Hz
+    "en_US-libritts-high:p3025": "f",  # 234 Hz
+    "en_US-libritts-high:p335": "m",  # 181 Hz
+    "en_US-libritts-high:p3922": "f",  # 186 Hz
+    "en_US-libritts-high:p6686": "f",  # 193 Hz
+    "en_US-libritts-high:p8113": "f",  # 207 Hz
+    "en_US-libritts-high:p8474": "m",  # 104 Hz
+    "en_US-libritts-high:p8677": "m",  # 174 Hz
+    "en_US-libritts_r-medium:1241": "f",  # 195 Hz
+    "en_US-libritts_r-medium:1271": "m",  # 133 Hz
+    "en_US-libritts_r-medium:1311": "m",  # 104 Hz
+    "en_US-libritts_r-medium:1379": "m",  # 163 Hz
+    "en_US-libritts_r-medium:1779": "f",  # 258 Hz
+    "en_US-libritts_r-medium:2012": "m",  # 119 Hz
+    "en_US-libritts_r-medium:2085": "m",  # 181 Hz
+    "en_US-libritts_r-medium:2137": "m",  # 129 Hz
+    "en_US-libritts_r-medium:3025": "f",  # 245 Hz
+    "en_US-libritts_r-medium:3922": "f",  # 188 Hz
+    "en_US-libritts_r-medium:8113": "f",  # 219 Hz
+    "en_US-libritts_r-medium:8474": "m",  # 117 Hz
+    "en_US-ryan-high": "f",  # 204 Hz
+    "en_US-ryan-low": "m",  # 172 Hz
+    "en_US-ryan-medium": "m",  # 162 Hz
 }
 
 

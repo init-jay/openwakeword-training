@@ -682,7 +682,11 @@ def select_piper_voices(args, wake_word: str) -> list:
         print("           that (~14% of that corpus). Run audit_voices.py --tts piper,")
         print("           listen to the shortlist, and fill the list in.")
 
-    kept = [(v, s) for (v, s) in found if v not in excluded]
+    # Match both forms. The audit scores SPEAKERS - en_US-l2arctic-medium ran from
+    # :ASI at 0% to :PNV at 100% on identical phonemes - so most entries are
+    # "voice:speaker". A bare voice name still excludes the whole model.
+    kept = [(v, s) for (v, s) in found
+            if v not in excluded and f"{v}:{s}" not in excluded]
     unknown = sum(1 for v, s in kept if voice_sex(v, s) == "u")
     print(f"  Piper voices: {len(kept)} of {len(found)} "
           f"({len(found) - len(kept)} excluded as mispronouncing)")
