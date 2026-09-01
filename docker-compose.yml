@@ -49,6 +49,12 @@ x-kokoro: &kokoro
 # the internal partition boundaries, and CUDA graph capture is what the memcpy nodes
 # already prevent. A real fix means re-exporting the model with foldable shape ops.
 #
+# Nor does slackr31337/wyoming-piper-gpu, which comes up when searching for this. Its
+# patches only ADD a --use-cuda flag and forward it to the piper subprocess - the
+# wyoming-piper it targets predates the flag existing upstream. It does nothing about
+# partitioning, and it pins CUDA 11.8 / cuDNN 8 / onnxruntime-gpu 1.14.1 with the
+# pre-rewrite Piper. Getting CUDA to RUN was never the problem here.
+#
 # Dropping the flag also removes a CUDA context that competed for the VRAM the
 # training run needs (Dockerfile:75-78), so corpus generation can now run DURING a
 # training run. The `deploy` GPU reservation below is kept only so the A/B can be
