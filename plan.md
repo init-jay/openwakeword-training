@@ -106,6 +106,31 @@ Do not build anything reusable in this phase.
 
 ## Phase 1 - shared corpus layer (2-3 days)
 
+**Status: extraction done, Piper generator written but not yet run, gate not yet run.**
+
+Done: `corpus/augment.py` (trimming, child-range copies), `corpus/real.py`,
+`corpus/negatives.py`, `corpus/piper.py`. `train.py` imports them and defines none of
+it any more; `Dockerfile` copies the package and fails the build if it does not import.
+
+Verified so far - all static or offline, none of it a substitute for the gate:
+
+- every moved function and constant is **byte-identical** to its pre-move version,
+  compared by AST against `git show HEAD:train.py`. The one intended exception is
+  `copy_real_samples`, whose only body change is `real_samples_dir` becoming a
+  parameter instead of a module global (the caller passes the same value).
+- `trim_silence`, `time_stretch` and `vocal_tract_shift` produce **bit-identical
+  output** to the originals across 60 real clips from `my_real_samples/` and
+  `negatives_tts/`.
+- `build_negative_phrases` returns an identical list for "hey seeree" (59 phrases)
+  and "hey cal" (21).
+- pyflakes reports no undefined names in `train.py` or the package, which is what
+  catches a function body still reaching for a deleted global. (It reports one
+  unused `time` import, which pre-dates this work.)
+
+Still to do: **the gate below**, and running `corpus/piper.py` against a live Wyoming
+Piper service - it is written from the protocol as `audit_voices.py` implements it and
+has never been executed.
+
 Extract the frontend-agnostic functions from `train.py` into `corpus/`, add a Piper
 generator beside `KokoroPool`, and make both trainers consume WAV directories.
 

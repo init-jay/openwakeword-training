@@ -96,8 +96,14 @@ RUN python3 -c "import tensorflow as tf; print('tensorflow', tf.__version__)" \
     && python3 -c "import onnx2tf" \
     && command -v onnx2tf
 
-# Copy training scripts
+# Copy training scripts. corpus/ is a package train.py imports, so it has to be in
+# the image alongside it - without it the container fails at import, before any of
+# the expensive setup runs.
+COPY corpus/ ./corpus/
 COPY train.py .
 COPY onnx2tflite.py .
 COPY setup-data.sh .
 RUN chmod +x setup-data.sh
+
+# Fail the build rather than a training run if the package does not import.
+RUN python3 -c "import corpus.augment, corpus.negatives, corpus.real, corpus.piper"

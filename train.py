@@ -22,45 +22,30 @@ import threading
 import time
 import uuid
 import warnings
-from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
 import requests
 import scipy.io.wavfile
 import yaml
-from scipy.signal import resample_poly
 from tqdm import tqdm
+
+# The engine-agnostic half of corpus construction, shared with the microWakeWord
+# trainer (see plan.md). Moved out of this file without behaviour change; the
+# reasoning that used to live here moved with it.
+from corpus.augment import (CHILD_STRETCH, CHILD_STRETCH_FRACTION,
+                            add_child_range_copies, trim_directory, trim_silence)
+from corpus.negatives import (MISPRONOUNCING_VOICES, TRAINING_COMMANDS,
+                              build_negative_phrases)
+from corpus.real import copy_real_samples
 
 warnings.filterwarnings("ignore", message="Reached EOF prematurely")
 
 WORK_DIR = Path(__file__).parent.resolve()
 os.chdir(WORK_DIR)
 
-# Negatives that are useful whatever the wake word is: ordinary openers, and the
-# wake words of other assistants.
-BASE_NEGATIVES = [
-    "hello", "hi there", "good morning", "excuse me", "okay",
-    "hey google", "alexa", "hey jarvis", "computer",
-]
-
-# Commands used two ways: appended to the wake word to build run-on positives
-# ("hey seeree what's the time"), and rendered on their own as negatives.
-#
-# Both halves are needed. The positives teach that the phrase can be followed
-# immediately by speech; without the matching negatives the model can learn the
-# shortcut "speech after ~ wake word" instead, since in training every clip with
-# trailing speech would be positive.
-#
-# Deliberately disjoint from generate_negatives.py's COMMAND list, which
-# generate_positives.py also uses for its cmd_run/cmd_pause sweeps - those are the
-# eval corpus, and training on them would turn that measurement into memorisation.
-TRAINING_COMMANDS = [
-    "open the garage door", "how cold is it outside", "start the kettle",
-    "find my phone", "skip this song", "dim the bedroom lights",
-    "how long is left on the timer", "put the heating on", "read my messages",
-    "lock the back door", "what is on tonight", "call the office",
-]
+# BASE_NEGATIVES, TRAINING_COMMANDS, MISPRONOUNCING_VOICES and
+# CONFUSABLE_NEGATIVES now live in corpus/negatives.py, imported above.
 
 # Speed coverage of the positives, widened at the top for run 9.
 #
@@ -142,101 +127,8 @@ PLAIN_SPEED_GRID = [round(PLAIN_SPEEDS[0] + i * PLAIN_SPEED_STEP, 2)
 # gate. There is roughly one more step of headroom, for diminishing returns.
 RUNON_TAIL_MS = (150.0, 300.0)
 
-# Vocal-tract-length perturbation, per voice sex.
-#
-# Run 12 measured the second speaker - a 4-year-old - at 24% detection against 97%
-# for the adult, and 34% on his OWN training clips. He was 26% of the real corpus,
-# so this is not under-representation: his fundamental sits outside the range of
-# almost everything the model has ever seen. Measured medians: ryan 291 Hz, jen
-# 269 Hz, jay 153 Hz, Kokoro am_adam 132 Hz, af_bella 227 Hz. openwakeword's own
-# PitchShift is +/-3 semitones at p=0.25 against a 13.6-semitone gap, so it cannot
-# close it - and it is the same resample-plus-stretch operation as this, just with
-# a range a quarter the size (torch_pitch_shift/main.py:156-168).
-#
-# The ratios are per sex because one global range serves neither. A listening test
-# on vtlp_demo/ (run 12): af_bella at 1.28 is the closest thing to ryan in the set,
-# while male voices "sound like teenagers up to R1.30 and useless above that
-# (chipmunk)". Male voices therefore cover the 152-172 Hz gap between the two real
-# speakers rather than reaching a child, which they cannot do without artefact -
-# and training on an artefact teaches the artefact.
-#
-# f -> 272-306 Hz, straddling ryan. m -> 152-172 Hz, the jay-to-ryan gap.
-CHILD_STRETCH = {"f": (1.20, 1.35), "m": (1.15, 1.30)}
-
-# These clips are ADDED to the corpus, not substituted into it. Substituting would
-# thin out adult coverage in proportion, which is the trade run 10 warns about:
-# real-clip density drives the result, so buying ryan by spending jay is not a win.
-CHILD_STRETCH_FRACTION = 0.5
-
-# Voices that mispronounce the wake word, per wake word.
-#
-# A wake word worth having is not a dictionary word, so Kokoro's g2p has to guess at
-# it - and some voices guess differently. These six say something that is not "hey
-# seeree", judged by ear over all 42 English voices rendering the phrase once
-# (vtlp_demo/voices/). Every clip such a voice produces is a mislabelled positive,
-# and at 1/42 of the voice list that is ~2.4% of the Kokoro corpus each, ~14% for
-# the six together - across plain AND run-on, since both draw from this list.
-#
-# Keyed per wake word: how a voice handles "seeree" says nothing about how it would
-# handle another phrase, so a global blocklist would be wrong for the next model.
-# Same reasoning as CONFUSABLE_NEGATIVES.
-#
-# HOW TO REBUILD THIS FOR A NEW WAKE WORD: render every voice saying the phrase once
-# and listen to all of them. It takes a couple of minutes and there is no shortcut -
-# duration does not work as a proxy. bm_fable sits at exactly the median length
-# (1121 ms, 1.00x) and is wrong; af_v0sky is 16% below median and is fine. The same
-# proxy also cleared "HEY SEEREE" as merely emphatic when it was spelled out.
-#
-# Excluded from negatives too, not just positives. A mispronunciation is arguably a
-# useful near-miss to train against, but it is much closer to the real phrase than
-# CONFUSABLE_NEGATIVES entries are, and teaching the model to REJECT something that
-# close risks costing detection on genuine variants. Untested either way.
-MISPRONOUNCING_VOICES = {
-    "hey_seeree": [
-        "af_alloy", "am_echo", "bf_alice", "bf_lily", "bm_daniel", "bm_fable",
-    ],
-}
-
-# Confusable negatives, per wake word.
-#
-# A model trained only on BASE_NEGATIVES rejects exactly what it was shown and
-# nothing adjacent: hey_seeree.onnx scored 0/8 on other assistants and 0/36 on
-# general conversation, but 13/20 on the phrase continuing into another word
-# ("hey serious" -> 0.995) and 5/12 on "hey" plus a different name. Those two
-# categories are the entire false-accept problem, and neither was in the wordlist.
-#
-# Three shapes matter, and all three want the wake word's own consonants:
-#   - the phrase, continuing into a different word ("hey Serena", "hey season")
-#   - "hey" attached to some other name ("hey Sienna", "hey Cynthia")
-#   - the same sounds inside running speech, with no "hey" at all
-# Bare "hey" belongs here too: it is what teaches that the second syllable is
-# required rather than optional.
-#
-# These are deliberately DISJOINT from the eval corpus in generate_negatives.py.
-# The gates in tuning.md are scored on that corpus, so any phrase appearing in
-# both turns a generalisation measurement into a memorisation one. When adding
-# phrases here, check them against EXTEND/RUNNING/HEY_OTHER over there first.
-CONFUSABLE_NEGATIVES = {
-    "hey_seeree": [
-        # the phrase, continuing into another word
-        "hey Serena", "hey serene", "hey serenade", "hey Syria", "hey syringe",
-        "hey sincere", "hey sincerely", "hey severe", "hey season",
-        "hey seasoning", "hey seizure", "hey ceases", "hey scenery",
-        "hey scenario", "hey CEO", "hey seatbelt", "hey sedan",
-        "hey ceremony", "hey sequin", "hey search for it",
-        # "hey" plus another name, and "hey" on its own
-        "hey Sienna", "hey Selena", "hey Sirena", "hey Cerys", "hey Cynthia",
-        "hey Sabrina", "hey Sylvia", "hey Simon", "hey Sadie", "hey Cecil",
-        "hey", "hey, come here a minute",
-        # the same sounds in running speech, with no "hey"
-        "The scenery on the coast road is worth the detour.",
-        "She was sincere about wanting to see the city again.",
-        "Season the sauce properly before you serve it.",
-        "Serena said she would meet us down by the seafront.",
-        "The ceremony starts at three and runs for about an hour.",
-        "It has been a severe winter by any measure.",
-    ],
-}
+# CHILD_STRETCH and CHILD_STRETCH_FRACTION now live in corpus/augment.py,
+# imported above, alongside the transforms that use them.
 
 
 def report_onnx_providers():
@@ -641,53 +533,7 @@ def generate_kokoro_samples(pool: "KokoroPool", voices: list, output_dir: Path,
     return written
 
 
-def build_negative_phrases(wake_word: str, negatives_file: str = None,
-                           with_commands: bool = True) -> list:
-    """Assemble the negative wordlist: base phrases plus confusables.
-
-    Confusables come from --negatives-file if given, otherwise from
-    CONFUSABLE_NEGATIVES for this wake word. Training without any is the single
-    biggest measured cause of false accepts, so it warns rather than proceeding
-    quietly.
-    """
-    safe_name = wake_word.replace(" ", "_").lower()
-    phrases = list(BASE_NEGATIVES)
-
-    # The commands that appear after the wake word in the run-on positives, here on
-    # their own. Without them every clip containing trailing command speech would be
-    # a positive, and "speech after" is a far easier feature to learn than the wake
-    # word itself.
-    if with_commands:
-        phrases += TRAINING_COMMANDS
-
-    if negatives_file:
-        path = Path(negatives_file)
-        if not path.exists():
-            print(f"ERROR: negatives file not found: {path}")
-            sys.exit(1)
-        confusables = [line.strip() for line in path.read_text().splitlines()]
-        confusables = [p for p in confusables if p and not p.startswith("#")]
-        print(f"  Confusable negatives: {len(confusables)} from {path}")
-    elif safe_name in CONFUSABLE_NEGATIVES:
-        confusables = list(CONFUSABLE_NEGATIVES[safe_name])
-        print(f"  Confusable negatives: {len(confusables)} built in for '{safe_name}'")
-    else:
-        confusables = []
-        print(f"  WARNING: no confusable negatives for '{safe_name}'.")
-        print("           The model will reject what it is shown here and fire on")
-        print("           anything adjacent to the wake word. Add an entry to")
-        print("           CONFUSABLE_NEGATIVES or pass --negatives-file.")
-
-    # A confusable that is also a positive text would teach the two classes the
-    # same clip; cheap to check, expensive to debug.
-    positives = {wake_word.lower()}
-    duplicates = [p for p in confusables if p.lower() in positives]
-    if duplicates:
-        print(f"ERROR: these negatives are the wake word itself: {duplicates}")
-        sys.exit(1)
-
-    seen, phrases = set(), phrases + confusables
-    return [p for p in phrases if not (p.lower() in seen or seen.add(p.lower()))]
+# build_negative_phrases now lives in corpus/negatives.py, imported above.
 
 
 def generate_runon_samples(pool: "KokoroPool", voices: list, output_dir: Path,
@@ -800,258 +646,9 @@ def generate_runon_samples(pool: "KokoroPool", voices: list, output_dir: Path,
     return success
 
 
-def copy_real_samples(wake_word: str, output_dir: Path, copies: int = 10) -> int:
-    """Copy real voice recordings to training directory, `copies` times each.
-
-    The copies are NOT redundant. They are written before openwakeword's
-    augmentation stage, which globs this whole directory, so each copy is augmented
-    independently: background noise from `background_paths` at p=0.75, a room
-    impulse response, EQ, pitch shift and gain. AddBackgroundNoise runs
-    mode="per_batch" and the copies are named real_{i}_... so sorting spreads them
-    ~195 apart - every copy lands in a different batch and draws different noise.
-    With augmentation_rounds=3 on top, 10 copies means 30 acoustically distinct
-    variants of each recording, not 30 identical ones.
-
-    That is why raising this from 3 to 10 in run 10 improved generalisation instead
-    of overfitting: held-out run-on detection went 53% -> 77%, the largest single
-    effect measured. Real clips are ~4% of the positive set by default and dominate
-    the result, because real speech carries room, mic and delivery characteristics
-    that Kokoro does not.
-
-    Batch class balance is unaffected (batch_n_per_class fixes that), so this only
-    changes how often a real clip is drawn WITHIN the positive class.
-
-    Recordings may sit loose in my_real_samples/ or be grouped one directory per
-    speaker (my_real_samples/jay/, my_real_samples/alex/, ...). Both layouts are
-    picked up, so speakers can be added, re-recorded, or dropped independently.
-    """
-    real_samples_dir = WORK_DIR / "my_real_samples"
-    if not real_samples_dir.exists():
-        print("  No real samples found (record your voice first)")
-        return 0
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    count = 0
-    per_speaker = {}
-
-    for wav_file in sorted(real_samples_dir.rglob("*.wav")):
-        try:
-            sr, data = scipy.io.wavfile.read(wav_file)
-            if sr != 16000:
-                from scipy.signal import resample
-                num_samples = int(len(data) * 16000 / sr)
-                data = resample(data, num_samples)
-                data = np.clip(data, -32768, 32767).astype(np.int16)
-
-            # Flatten the path into the destination filename. Two speakers recording
-            # the same phrase produce identical basenames (hey_seeree_0001.wav), so
-            # using wav_file.name alone would silently overwrite one with the other.
-            rel = wav_file.relative_to(real_samples_dir)
-            stem = "_".join(rel.with_suffix("").parts)
-            speaker = rel.parts[0] if len(rel.parts) > 1 else "(loose files)"
-            per_speaker[speaker] = per_speaker.get(speaker, 0) + 1
-
-            # Create multiple copies to weight real samples higher
-            for i in range(copies):
-                dest = output_dir / f"real_{i}_{stem}.wav"
-                scipy.io.wavfile.write(str(dest), 16000, data)
-                count += 1
-        except Exception as e:
-            print(f"  Error processing {wav_file}: {e}")
-
-    if per_speaker:
-        detail = ", ".join(f"{s}: {n}" for s, n in sorted(per_speaker.items()))
-        print(f"  Found {sum(per_speaker.values())} real samples ({detail})")
-    print(f"  Copied {count} real voice samples ({copies}x weight)")
-    return count
-
-
-def time_stretch(x: np.ndarray, factor: float, sr: int = 16000,
-                 frame_ms: float = 30.0, seek_ms: float = 7.0) -> np.ndarray:
-    """Lengthen `x` by `factor` without moving pitch (WSOLA overlap-add).
-
-    Plain overlap-add at a fixed hop cuts frames at arbitrary phase and the
-    reassembled periods fight each other, which on a voiced phrase sounds like
-    added roughness. WSOLA slides each analysis frame within +/-`seek_ms` to the
-    offset that best correlates with what naturally followed the previous frame,
-    so consecutive frames stay in phase.
-
-    scipy only, deliberately: the trainer image has no ffmpeg (Dockerfile:7) and
-    torchaudio is not importable from the eval tools, so anything relying on either
-    could not be checked outside the container.
-    """
-    if abs(factor - 1.0) < 1e-3 or len(x) < int(sr * frame_ms / 1000) * 2:
-        return x.astype(np.float64)
-
-    x = x.astype(np.float64)
-    N = int(sr * frame_ms / 1000)
-    hop_in = N // 4
-    hop_out = max(1, int(round(hop_in * factor)))
-    seek = int(sr * seek_ms / 1000)
-    win = np.hanning(N + 1)[:N]
-
-    out = np.zeros(int(len(x) * factor) + 2 * N)
-    weight = np.zeros_like(out)
-    tail = None
-    i = 0
-    while True:
-        want = i * hop_in
-        offset = 0
-        if tail is not None:
-            lo, hi = max(0, want - seek), min(len(x) - N, want + seek)
-            if hi > lo:
-                seg = x[lo:hi + len(tail)]
-                if len(seg) >= len(tail):
-                    offset = lo + int(np.argmax(np.correlate(seg, tail, "valid"))) - want
-        start = want + offset
-        dest = i * hop_out
-        if start < 0 or start + N > len(x) or dest + N > len(out):
-            break
-        out[dest:dest + N] += x[start:start + N] * win
-        weight[dest:dest + N] += win
-        nxt = start + hop_out
-        tail = x[nxt:nxt + N // 2] if nxt + N // 2 <= len(x) else None
-        i += 1
-
-    covered = weight > 1e-6
-    out[covered] /= weight[covered]
-    return out[:int(len(x) * factor)]
-
-
-def vocal_tract_shift(data: np.ndarray, ratio: float, sr: int = 16000) -> np.ndarray:
-    """Raise F0 and formants by `ratio`, keeping the clip's original duration.
-
-    Resampling alone raises pitch and formants together - which is what a shorter
-    vocal tract does, and why this reaches a child voice where a formant-corrected
-    shift would not - but it also shortens the clip by the same factor. The stretch
-    puts the duration back, so the only thing that changed is the speaker, not the
-    delivery speed. Verified against `ffmpeg -af asetrate,aresample,atempo` on the
-    vtlp_demo/ clips: same F0 to within the estimator's resolution, and this keeps
-    the original length exactly where atempo drifts ~3%.
-    """
-    frac = Fraction(ratio).limit_denominator(100)
-    shifted = resample_poly(data.astype(np.float64), frac.denominator, frac.numerator)
-    out = time_stretch(shifted, float(ratio), sr=sr)
-
-    peak = np.abs(out).max()
-    if peak > 32767:
-        out = out * (32767 / peak)
-    return out.astype(np.int16)
-
-
-def add_child_range_copies(directory: Path, desc: str,
-                           fraction: float = CHILD_STRETCH_FRACTION) -> int:
-    """Add pitch/formant-shifted copies of the Kokoro clips in `directory`.
-
-    Only Kokoro clips are shifted, and the ratio comes from the voice's sex, which
-    is why the voice is in the filename. Real recordings are left alone: ryan needs
-    no shifting, and jay is male, so shifting him reaches the teen range that ~15
-    Kokoro male voices already cover far more cheaply than 160 clips of one speaker.
-
-    Copies are ADDED - see CHILD_STRETCH_FRACTION.
-    """
-    clips = [p for p in sorted(directory.glob("*.wav"))
-             if p.name.startswith(("kokoro_", "runon_"))]
-    if not clips:
-        return 0
-
-    written = 0
-    for clip in tqdm(clips, desc=desc, unit="clip"):
-        # kokoro_{voice}_{uuid}.wav -> af_bella; the sex is the voice prefix's
-        # second letter (af_/bf_ female, am_/bm_ male).
-        parts = clip.stem.split("_")
-        if len(parts) < 3 or len(parts[1]) != 2:
-            continue
-        sex = parts[1][1]
-        span = CHILD_STRETCH.get(sex)
-        if span is None:
-            continue
-        if np.random.random() >= fraction:
-            continue
-
-        try:
-            sr, data = scipy.io.wavfile.read(clip)
-        except Exception:
-            continue
-        if sr != 16000 or data.ndim != 1 or len(data) < 480:
-            continue
-
-        ratio = float(np.random.uniform(*span))
-        shifted = vocal_tract_shift(data, ratio)
-        scipy.io.wavfile.write(
-            str(directory / f"vtlp{ratio:.2f}_{clip.name}"), 16000, shifted)
-        written += 1
-
-    print(f"  Added {written} pitch/formant-shifted copies of {len(clips)} Kokoro clips")
-    return written
-
-
-def trim_silence(data: np.ndarray, sr: int = 16000, top_db: float = 40.0,
-                 pad_ms: float = 30.0, frame_ms: float = 10.0) -> np.ndarray:
-    """
-    Trim leading and trailing silence using short-time RMS energy.
-
-    OpenWakeWord's create_fixed_size_clip (openwakeword/data.py:719) aligns the END
-    OF THE ARRAY with the end of the fixed-size window, not the end of the speech:
-
-        start = max(0, n_samples - (len(x) + end_jitter))
-
-    Trailing silence therefore pushes the phrase earlier in the window than the
-    alignment the model actually sees when streaming detection fires. Leading
-    silence matters here too: recordings from record_samples.py are a fixed 2s
-    buffer with the phrase somewhere inside it, so untrimmed they fill the window
-    and land at a completely different offset than the tight Kokoro clips.
-    """
-    if data.size == 0:
-        return data
-
-    frame = max(1, int(sr * frame_ms / 1000))
-    n_frames = len(data) // frame
-    if n_frames < 2:
-        return data
-
-    frames = data[:n_frames * frame].astype(np.float64).reshape(n_frames, frame)
-    rms = np.sqrt(np.mean(frames ** 2, axis=1))
-    peak = rms.max()
-    if peak <= 0:
-        return data
-
-    voiced = np.flatnonzero(rms > peak * (10 ** (-top_db / 20)))
-    if voiced.size == 0:
-        return data
-
-    pad = int(sr * pad_ms / 1000)
-    start = max(0, voiced[0] * frame - pad)
-    end = min(len(data), (voiced[-1] + 1) * frame + pad)
-
-    # Never hand back a clip too short to contain a wake word - if the energy
-    # detection produced something implausible, keep the original.
-    if end - start < int(sr * 0.2):
-        return data
-
-    return data[start:end]
-
-
-def trim_directory(directory: Path, desc: str):
-    """Trim silence from every WAV in a directory, in place."""
-    wavs = sorted(directory.glob("*.wav"))
-    if not wavs:
-        return 0, 0.0
-
-    removed_ms = []
-    for wav_file in tqdm(wavs, desc=desc):
-        try:
-            sr, data = scipy.io.wavfile.read(wav_file)
-            if data.ndim > 1:
-                data = data[:, 0]
-            trimmed = trim_silence(data, sr)
-            if len(trimmed) < len(data):
-                removed_ms.append((len(data) - len(trimmed)) / sr * 1000)
-                scipy.io.wavfile.write(str(wav_file), sr, trimmed.astype(np.int16))
-        except Exception as e:
-            print(f"  Error trimming {wav_file.name}: {e}")
-
-    return len(removed_ms), float(np.mean(removed_ms)) if removed_ms else 0.0
+# copy_real_samples, time_stretch, vocal_tract_shift,
+# add_child_range_copies, trim_silence and trim_directory now live in
+# corpus/real.py and corpus/augment.py, imported above.
 
 
 def setup_training_dirs(wake_word: str) -> Path:
@@ -1391,9 +988,10 @@ def main():
         add_child_range_copies(pos_test, "VTLP positive test", args.child_fraction)
 
     print("\n[Real Voice]")
-    real_count = copy_real_samples(wake_word, pos_train, args.real_copies)
+    real_samples_dir = WORK_DIR / "my_real_samples"
+    real_count = copy_real_samples(real_samples_dir, pos_train, args.real_copies)
     if real_count > 5:
-        copy_real_samples(wake_word, pos_test, args.real_copies)
+        copy_real_samples(real_samples_dir, pos_test, args.real_copies)
 
     # === NEGATIVE SAMPLES ===
     print("\n" + "=" * 60)
