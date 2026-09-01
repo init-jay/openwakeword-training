@@ -65,6 +65,22 @@ python train.py --wake-word "hey cal"
 - trainer container connects via `http://kokoro:8880` (set by KOKORO_URL env var)
 - train.py also accepts `--kokoro-url` flag
 
+### Piper TTS
+- `Dockerfile.piper` + the `piper` service. Built rather than pulled:
+  `rhasspy/wyoming-piper` is debian-slim with CPU onnxruntime and cannot use a GPU.
+- Wyoming protocol over TCP (10200), not HTTP. Client is `corpus/piper.py`.
+- Start it explicitly - the trainer deliberately does not `depends_on` it:
+  `docker compose up -d piper`
+- **ONE instance, unlike Kokoro's two.** Piper parallelises across cores (980% CPU
+  measured), so a second instance contends rather than scales - measured at 0.88x.
+  Client concurrency does not help either. See the note in `docker-compose.yml`.
+- `bench_tts.py` re-measures this for either engine. The numbers in that note came
+  from an emulated laptop and are a floor; re-run on the training server before
+  sizing anything: `python bench_tts.py --engine piper --instances 10200 10201`
+- `--use-cuda` is in the compose `command`, so it can be A/B'd without a rebuild.
+  Unmeasured, but the case is decent: Piper is genuinely CPU-bound, so offload has
+  something to win, unlike Kokoro where the GPU already sat idle at 21%.
+
 ## Important Design Decisions
 
 - **Negatives must include near-misses of the wake word**, not just clearly different phrases. Measured on `hey_seeree.onnx` (see `tuning.md`): trained on nine distinct phrases only, it false-accepted 0/8 on other assistants and 0/36 on general conversation but 13/20 on the phrase continuing into another word ("hey serious" → 0.995) and 5/12 on "hey" plus another name. `train.py` therefore keeps `BASE_NEGATIVES` (wake-word independent) plus `CONFUSABLE_NEGATIVES[safe_name]`; `--negatives-file` supplies the latter for a wake word with no built-in entry.

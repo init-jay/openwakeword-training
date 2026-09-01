@@ -13,6 +13,64 @@ x-kokoro: &kokoro
             count: all
             capabilities: [gpu]
 
+# Piper, for the microWakeWord corpus (plan.md) and as a second engine for this one.
+# Built here rather than pulled: rhasspy/wyoming-piper is debian-slim with CPU
+# onnxruntime and cannot use a GPU at all. See Dockerfile.piper.
+#
+# ONE INSTANCE, NOT TWO - PIPER DOES NOT SCALE THE WAY KOKORO DOES. The note above
+# describes a single-threaded process using one core, where more instances scale
+# roughly linearly. Piper is the opposite: onnxruntime parallelises across cores, and
+# one instance under load measured 980% CPU - ten cores, the whole machine. Measured
+# back to back on the same box:
+#
+#     1 instance,  2 client threads    11.23 clips/s
+#     2 instances, 1 thread each        9.84 clips/s   = 0.88x
+#
+# A second instance is SLOWER, because the two contend for the cores the first one
+# was already using. Client concurrency does not help either - throughput was flat
+# at ~7.5-8 clips/s from 1 to 8 threads while latency grew linearly (133 -> 996 ms),
+# which is queueing, not parallelism. So: one piper service, ~2 client threads.
+#
+# Those absolute numbers are a FLOOR, not a capacity plan: they were measured under
+# amd64 emulation on an ARM laptop, CPU-only. Re-measure on the training server with
+# bench_tts.py before sizing anything. The shape - parallel across cores rather than
+# single-threaded - is architectural and does carry over.
+#
+# `--use-cuda` IS A FLAG TO MEASURE, and the case for it is now BETTER than it looked.
+# The argument against was the Kokoro measurement, where the GPU sat at 21% because
+# the bottleneck was one Python thread. That does not apply here: Piper is genuinely
+# CPU-bound across every core, so offloading it could free the whole machine. Whether
+# it does is unmeasured - it needs a GPU host. A/B it by deleting the flag from
+# `command`; no rebuild needed.
+#
+# There is still a reason to prefer CPU. Dockerfile:75-78 requires
+# `docker compose stop kokoro kokoro2` before training, because their CUDA contexts
+# hold ~2.4 GB the GPU-resident feature patch needs. A Piper instance without
+# `--use-cuda` creates no CUDA context, so it can keep generating corpus DURING a
+# training run instead of competing with it for VRAM.
+#
+# SPEED: Wyoming's synthesize event carries no rate control, so corpus/piper.py
+# re-times clips afterwards with a pitch-preserving stretch. `--length-scale` is
+# Piper's native alternative but is set per SERVER, not per request - so using it
+# means one instance per speed, which composes with scaling by instance count. Not
+# enabled here; decide before generating a corpus, since it changes what the speed
+# sweep actually varies.
+x-piper: &piper
+  build:
+    context: .
+    dockerfile: Dockerfile.piper
+  volumes:
+    # Voices are downloaded on demand and get large - libritts_r alone carries 904
+    # speakers - so they persist here rather than in the container.
+    - ./piper_voices:/data
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
 services:
   kokoro:
     <<: *kokoro
@@ -23,6 +81,16 @@ services:
     <<: *kokoro
     ports:
       - "8881:8880"
+
+  # Deliberately a single instance - see the measurement above. If a re-measure on
+  # the training server shows one instance NOT saturating the cores there, a piper2
+  # on 10201 is a copy of this block with the port changed.
+  piper:
+    <<: *piper
+    ports:
+      - "10200:10200"
+    command: ["--uri", "tcp://0.0.0.0:10200", "--data-dir", "/data",
+              "--download-dir", "/data", "--use-cuda"]
 
   trainer:
     build: .
@@ -40,6 +108,10 @@ services:
     environment:
       # Both instances; each is a separate single-threaded process.
       - KOKORO_URL=http://kokoro:8880,http://kokoro2:8880
+    # Deliberately NOT depends_on piper. Nothing in train.py talks to it yet, and
+    # listing it would start two more GPU services for every `compose run trainer`
+    # - including the conversion and eval one-offs - holding VRAM the training run
+    # wants. Start it explicitly: `docker compose up -d piper piper2`.
     depends_on:
       - kokoro
       - kokoro2

@@ -106,11 +106,14 @@ Do not build anything reusable in this phase.
 
 ## Phase 1 - shared corpus layer (2-3 days)
 
-**Status: extraction done, Piper generator written but not yet run, gate not yet run.**
+**Status: extraction done, Piper generator working against a live server, gate not yet run.**
 
 Done: `corpus/augment.py` (trimming, child-range copies), `corpus/real.py`,
 `corpus/negatives.py`, `corpus/piper.py`. `train.py` imports them and defines none of
 it any more; `Dockerfile` copies the package and fails the build if it does not import.
+`Dockerfile.piper` + the `piper`/`piper2` compose services host Piper with the GPU
+available - built rather than pulled, because rhasspy/wyoming-piper is debian-slim
+with CPU onnxruntime and cannot use a GPU at all.
 
 Verified so far - all static or offline, none of it a substitute for the gate:
 
@@ -127,9 +130,21 @@ Verified so far - all static or offline, none of it a substitute for the gate:
   catches a function body still reaching for a deleted global. (It reports one
   unused `time` import, which pre-dates this work.)
 
-Still to do: **the gate below**, and running `corpus/piper.py` against a live Wyoming
-Piper service - it is written from the protocol as `audit_voices.py` implements it and
-has never been executed.
+`corpus/piper.py` has now been run against a live server (the container above, CPU
+mode, on an amd64 emulation): `piper_voices` enumerated 2005 (voice, speaker) pairs
+across en_US/en_GB, and `piper_render` returned 16 kHz int16 at exact speed ratios -
+0.7000, 1.2501, 1.6001 on a single rendering. Resampling 22050 -> 16000 produced no
+clipping (peak 32717, zero samples out of int16 range) on the clip checked, though
+Piper normalises to full scale so the guard clip in `piper_render` earns its place.
+
+Worth knowing: measuring speed across SEPARATE renderings looks wrong, because VITS
+samples durations per call - three calls at 1.0/1.6/0.7 gave 0.964 s/0.501 s/1.194 s,
+which is not the 1.6x it looks like. Compare stretch ratios on one clip, not across
+calls. Same stochasticity `audit_voices.py` documents.
+
+Still to do: **the gate below**. Also untested: `--use-cuda` itself, which needs a
+GPU host - and per the note in docker-compose.yml is a flag to measure rather than
+assume.
 
 Extract the frontend-agnostic functions from `train.py` into `corpus/`, add a Piper
 generator beside `KokoroPool`, and make both trainers consume WAV directories.

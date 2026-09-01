@@ -42,3 +42,5 @@ __pycache__/
 vtlp_demo/
 voice_audit/
 voice_audit_piper/
+# Piper voice models, downloaded on demand into the piper containers' volume
+piper_voices/
