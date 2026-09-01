@@ -6,7 +6,7 @@ measurement said - including the predictions that turned out wrong. It is kept i
 that form deliberately: several conclusions here were reversed by later runs, and the
 reasoning is worth more than the conclusions when picking the next lever.
 
-Fifteen runs against "hey seeree", every number measured rather than estimated.
+Sixteen runs against "hey seeree", every number measured rather than estimated.
 
 ## Current settings and results
 
@@ -21,33 +21,41 @@ Fifteen runs against "hey seeree", every number measured rather than estimated.
     PLAIN_SPEEDS  = (0.7, 1.6)
     MISPRONOUNCING_VOICES         6 of 42 voices say the wrong word - exclude by ear
 
-**Ship candidate: `92ac528`** (run 15) — run 14's corpus fixes with run 13's alignment.
-It detects no better than `68b37db` on any measurement that survives the noise band; it
-is the candidate because it is equal on detection *and* passes the latency gate (110 ms,
-peak 120 ms) that run 14 failed at 160 ms. Deploy at **0.15**, not 0.5.
+**Ship candidate: `f16d532`** (run 16) — the first model that covers three speakers.
+Even with `92ac528` on jay and ryan, much better on jen, and back to 0/68 on
+ordinary-speech false accepts. Deploy at **0.15**, not 0.5: at 0.5 ryan loses 33 points
+of plain detection. Its one blemish is a 123 ms median latency against the 120 ms gate -
+a 3 ms miss with no mechanism found behind it; replicate before believing it.
 
 Best models at 8/32 adversarial false accepts, on held-out recordings, **scored per
 speaker — never pooled**:
 
-| plain / run-on | jay, adult (35/57) | ryan, age 4 (6/14) | ryan plain at thr 0.5 |
-|---|---|---|---|
-| `92ac528` run 15 | **100% / 84%** | 83% / **86%** | **83%** |
-| `66d876e` run 14 | **100% / 84%** | **100% / 86%** | 50% |
-| `68b37db` run 13 | 97% / 86% | 83% / 79% | 67% |
-| `9a938fb` run 11 | **100% / 91%** | 83% / 79% | 33% |
-| `2213187` run 12 | 97% / 84% | 50% / 79% | 17% |
+| plain / run-on | jay, adult (35/57) | ryan, age 4 (6/14) | jen (10, plain only) | ryan plain at thr 0.5 |
+|---|---|---|---|---|
+| `f16d532` run 16 | 94% / 84% | 83% / **86%** | **100%** | 67% |
+| `92ac528` run 15 | **100% / 84%** | 83% / **86%** | 70% | **83%** |
+| `66d876e` run 14 | **100% / 84%** | **100% / 86%** | — | 50% |
+| `68b37db` run 13 | 97% / 86% | 83% / 79% | 90% | 67% |
+| `9a938fb` run 11 | **100% / 91%** | 83% / 79% | 80% | 33% |
+| `2213187` run 12 | 97% / 84% | 50% / 79% | — | 17% |
+
+At the 0.15 deployment threshold, run 16 reads jay 97/84, ryan 100/86, jen 100 plain,
+9/32 adversarial, 0/68 ordinary.
 
 Ryan's set is 6 plain and 14 run-on clips - small enough that one clip is 17 points.
-See run 13 for why the result is still credible.
+See run 13 for why the result is still credible. **jen has no run-on set at all**, and
+`compare_models.py` defaults `--runon` to jay's, so a jen invocation prints a run-on
+column that is not jen's. Recording `my_real_samples_holdout/jen_runon/` is the next
+thing owed to this table.
 
 Where it started, on jay: 63% plain, **5%** run-on, 13/20 false accepts on "hey
 serious", 220 ms latency, 83 minutes per run (now ~16). On ryan, before run 13: 24%.
+On jen, at 8 training clips: 70%.
 
 Never solved: `extend` false accepts, 6-8/32 across every run since run 6.
 
-Watch in run 16: run 15 is the first model to false-accept an *ordinary* speech clip
-("...series... seriously good", 0.938 against 0.005-0.138 elsewhere). One clip, so not
-yet an effect - but `general`/`command`/`other_ww`/`running` had been clean since run 6.
+Resolved: the ordinary-speech false accept flagged in run 15 was noise - the same clip
+reads 0.002 in run 16, and the explanation offered for it in run 15 was wrong.
 
 ## Four rules, learned the expensive way
 
@@ -183,6 +191,105 @@ repeats carry ~1/6 the novelty of one speed step - which is why raising
 
 ---
 
+## Run 16: `f16d532` — a third speaker, and the run-13 lesson replicates
+
+**No code change affecting training.** `f16d532` is the tflite-conversion commit; its
+`train.py` diff is comment-only. This is a pure data delta, and a narrow one:
+
+| speaker | in run 15 | in run 16 | held out |
+|---|---:|---:|---:|
+| jay | 160 | 160 | 35 plain / 57 run-on |
+| ryan (age 4) | 78 | 78 | 6 plain / 14 run-on |
+| jen | **8** | **93** | 10 plain, no run-on set |
+
+jay and ryan are byte-identical to run 15. The whole change is jen going from token
+representation to a real one, +85 clips, and the real corpus 246 -> 331.
+
+`my_real_samples/emily/` exists and is empty. It contributes nothing; it is a
+placeholder, not a fourth speaker.
+
+### The holdout is clean, and it was worth checking
+
+jen's held-out clips were split out of the same recording session as her training
+clips, minutes apart - not recorded after the model trained, the way jay's and ryan's
+were. So rule 1 was checked directly rather than assumed: zero filename overlap, zero
+md5 overlap against the whole of `my_real_samples/`, and every held-out index absent
+from the trained set. The model did not train on them.
+
+It is still the weaker kind of holdout. It measures generalisation to new *utterances*,
+not to a new session, mic placement, or room - so treat jen's number as an upper bound
+relative to jay's and ryan's. **There is also no `jen_runon/`**, so jen has no run-on
+number at all, and run-on is the metric that matters most. `compare_models.py`
+silently falls back to `--runon my_real_samples_holdout/jay_runon`, so a jen invocation
+prints a run-on column that is jay's data. Ignore that column; build `jen_runon/`.
+
+### Detection: jen fixed, jay and ryan unmoved
+
+Plain/run-on at matched adversarial false accepts. jen is plain-only.
+
+| adv FA | jay `f16d532` | `92ac528` | `68b37db` | ryan `f16d532` | `92ac528` | jen `f16d532` | `92ac528` | `68b37db` |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 6/32 | 80/60 | 86/67 | **97/86** | 33/79 | 50/86 | 80 | 50 | 80 |
+| 8/32 | 94/84 | **100**/84 | 97/**86** | 83/86 | 83/86 | **100** | 70 | 90 |
+| 10/32 | 100/**96** | 100/88 | 100/**98** | 100/86 | 100/86 | **100** | 70 | 90 |
+
+**jen: 70% -> 100% at 8/32.** jay and ryan move by less than the noise band in both
+directions. That is exactly the shape of run 13's result, and it replicates its lesson
+on a second speaker: **a speaker with token representation in the corpus is detected
+badly, and ~90 clips fixes them, without costing the speakers already covered.** Eight
+clips was not enough to count as represented.
+
+Note jen was already at 80-90% on the older models without being trained on. So the
+gain is real but smaller than run 13's child gap - she was never invisible, only
+unreliable.
+
+### The run-15 ordinary-speech false accept was noise
+
+Flagged in run 15 to watch: `running_020_af_sarah.wav` ("...series... seriously good")
+scored 0.938 there against 0.005-0.138 everywhere else. Run 16: **0.002**. Ordinary
+categories are back to 0/68 across `general`, `command`, `other_ww` and `running`.
+
+One clip was not an effect, as rule 3 says. The plain-weighting hypothesis written in
+run 15 for *why* it happened is unsupported and should be dropped rather than carried
+forward - `positive_texts` is unchanged between the two runs, so it never explained it.
+
+### Alignment and latency: a marginal miss, probably noise
+
+| | run 13 | run 15 `92ac528` | run 16 `f16d532` |
+|---|---|---|---|
+| peak | 160 ms | 120 ms | 160 ms |
+| firing band | 80-240 ms | 80-280 ms | 80-320 ms |
+| median latency (jay) | 91 ms | 110 ms | **123 ms** - 3 ms over the gate |
+| p90 latency (jay) | 162 ms | 169 ms | 223 ms |
+
+Peak is back where run 13 sat and well inside the acceptable range; the latency floor
+is unchanged at 80 ms. The obvious suspect for the widened band was jen's 93 new clips
+carrying trailing material, since that is the mechanism that broke run 14 - **tested
+with `check_alignment.py` and it is wrong**: jen's clips trim to 0 ms mean trailing
+silence, identical to jay's and ryan's. No corpus explanation found, so this reads as
+run-to-run variation. Worth re-checking next run rather than acting on.
+
+(`check_alignment.py` did turn up one ryan clip longer than the 2 s window, whose tail
+is discarded, and six long jay clips. Pre-existing, unrelated, worth a listen sometime.)
+
+### Ship candidate: `f16d532` (run 16)
+
+The first model that covers three speakers. Against run 15 it is even on jay and ryan,
+much better on jen, and cleaner on ordinary-speech false accepts (0/68 vs 1/68). The
+123 ms latency is a real gate miss but a 3 ms one, against run 14's 160 ms which had a
+mechanism behind it - replicate before treating it as a regression.
+
+Deploy at **0.15**: jay 97% plain / 84% run-on, ryan 100% / 86%, jen 100% plain,
+9/32 adversarial, **0/68 ordinary**. 0.5 remains the wrong operating point - it costs
+ryan 33 points of plain detection.
+
+Open, unchanged since run 6: `extend` false accepts, 8/32.
+
+Next: record `my_real_samples_holdout/jen_runon/`, so the speaker with the newest data
+is not the one speaker with no run-on measurement.
+
+---
+
 ## Run 15: `92ac528` — the alignment fix worked, and it is the only thing that moved
 
 One change against run 14: `...` and `!!` dropped from `positive_texts`, `wake_word`
@@ -247,6 +354,12 @@ carries both "series" and "seriously". The most likely reading is that weighting
 plain rendering back up (two `wake_word` entries out of six) sharpened the model on the
 bare phrase at the cost of a little margin against phrase-like material with no "hey"
 in front. Worth watching in run 16; not worth acting on yet.
+
+**Run 16 disproved this.** The same clip reads 0.002 there, and `positive_texts` is
+unchanged between the two runs - so the hypothesis never explained the observation in
+the first place. It was one clip of run-to-run variation, and the right call would have
+been to say only that and stop. Kept here as an example of the failure mode: a
+mechanism was available, so a mechanism got written down.
 
 ### Ship candidate: `92ac528` (run 15) displaces `68b37db`
 
