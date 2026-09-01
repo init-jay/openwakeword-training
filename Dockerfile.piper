@@ -53,5 +53,9 @@ assert 'CUDAExecutionProvider' in providers, 'CUDA provider missing from the bui
 VOLUME ["/data"]
 EXPOSE 10200
 
+# `--voice` is required by wyoming-piper even though voices download on demand -
+# without it the process exits 2 before binding the port. It is only the default for
+# requests that do not name a voice, and corpus/piper.py always names one.
 ENTRYPOINT ["python3", "-m", "wyoming_piper"]
-CMD ["--uri", "tcp://0.0.0.0:10200", "--data-dir", "/data", "--download-dir", "/data"]
+CMD ["--uri", "tcp://0.0.0.0:10200", "--data-dir", "/data", "--download-dir", "/data", \
+     "--voice", "en_US-lessac-medium"]

@@ -83,12 +83,20 @@ services:
       - "8881:8880"
 
   # Deliberately a single instance - see the measurement above.
+  #
+  # `--voice` is REQUIRED by wyoming-piper even though it downloads voices on
+  # demand: without it the process exits 2 with "--voice is required for the piper
+  # backend" before binding the port, and the only symptom further up the stack is
+  # that the service name stops resolving. It is only the DEFAULT for requests that
+  # do not name a voice - corpus/piper.py always names one, so this does not
+  # constrain which voices the corpus can use.
   piper:
     <<: *piper
     ports:
       - "10200:10200"
     command: ["--uri", "tcp://0.0.0.0:10200", "--data-dir", "/data",
-              "--download-dir", "/data", "--use-cuda"]
+              "--download-dir", "/data", "--voice", "en_US-lessac-medium",
+              "--use-cuda"]
 
   # Second instance, for `bench_tts.py --instances 10200 10201` only. Behind a
   # profile so it is NOT started by `docker compose up` - on the box this was first
@@ -105,7 +113,8 @@ services:
     ports:
       - "10201:10200"
     command: ["--uri", "tcp://0.0.0.0:10200", "--data-dir", "/data",
-              "--download-dir", "/data", "--use-cuda"]
+              "--download-dir", "/data", "--voice", "en_US-lessac-medium",
+              "--use-cuda"]
 
   trainer:
     build: .
