@@ -117,6 +117,12 @@ available there.
 - **Training negatives are kept disjoint from the eval corpus** in `generate_negatives.py`. The false-accept gates in `tuning.md` are scored on that corpus, so a phrase in both would turn a generalisation measurement into a memorisation one.
 - **Some Kokoro voices mispronounce the wake word, and must be excluded by ear.** A wake word is not a dictionary word, so g2p guesses at it and voices guess differently — 6 of 42 said something other than "hey seeree", ~14% of the synthetic corpus. `MISPRONOUNCING_VOICES` holds them per wake word; `--exclude-voices` adds more. **Rebuild this list for every new wake word by rendering all 42 voices saying the phrase and listening to each.** Duration is not a usable proxy: the worst offender sat at exactly the median length. Same rule applies to `positive_texts` — never add a variant without hearing it.
 - **Positives are pitch/formant-shifted to cover non-adult voices.** `add_child_range_copies` adds a resampled-and-restretched copy of a fraction of the Kokoro clips (`--child-fraction`, default 0.5), at a ratio picked from the voice's sex: female 1.20-1.35x, male 1.15-1.30x. Without it the corpus is adult-only and a child is barely detected at all — run 12 measured a 4-year-old at 24% against the adult's 97%, and at 34% on his *own training clips*. Copies are added, never substituted, so adult density is unchanged.
+- **A second TTS engine SUBSTITUTES into the positive corpus, never adds to it.**
+  `--piper-fraction` replaces a share of the phrase-alone budget with Piper, holding
+  total clips, the plain/run-on split and real-clip density fixed. Adding instead
+  would drop real clips from ~17% of positives toward ~6%, and real-clip density is
+  the largest lever measured here (run 10). Run-ons stay Kokoro: their cut point
+  needs word timestamps, which Wyoming does not provide.
 - **Evaluate every speaker separately, never pooled.** `my_real_samples_holdout/<speaker>/` and `<speaker>_runon/`. A speaker missing from the holdout does not produce a worse number, it produces a confident irrelevant one — that is how the child gap stayed invisible for eleven runs.
 - `max_negative_weight` (`train.py`, currently 2000) is the lever if a larger negative list makes the model too conservative.
 - All audio is 16kHz, 16-bit, mono WAV.

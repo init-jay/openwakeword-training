@@ -127,28 +127,46 @@ def vocal_tract_shift(data: np.ndarray, ratio: float, sr: int = 16000) -> np.nda
 
 def add_child_range_copies(directory: Path, desc: str,
                            fraction: float = CHILD_STRETCH_FRACTION) -> int:
-    """Add pitch/formant-shifted copies of the Kokoro clips in `directory`.
+    """Add pitch/formant-shifted copies of the SYNTHETIC clips in `directory`.
 
-    Only Kokoro clips are shifted, and the ratio comes from the voice's sex, which
-    is why the voice is in the filename. Real recordings are left alone: ryan needs
-    no shifting, and jay is male, so shifting him reaches the teen range that ~15
-    Kokoro male voices already cover far more cheaply than 160 clips of one speaker.
+    Only synthetic clips are shifted, and the ratio comes from the voice's sex,
+    which is why the voice is in the filename. Real recordings are left alone: ryan
+    needs no shifting, and jay is male, so shifting him reaches the teen range that
+    ~15 Kokoro male voices already cover far more cheaply than 160 clips of one
+    speaker.
+
+    Piper clips participate on equal terms, by carrying the sex in the same
+    position: corpus/piper.py names them `piper_p{sex}_...` precisely so the
+    extraction below needs no special case. A Piper voice whose sex has not been
+    established is written `piper_pu_...` and falls out at the CHILD_STRETCH lookup
+    rather than being shifted by a guessed ratio - shifting a male voice by the
+    female range produces the artefact run 12 warned about, and training on an
+    artefact teaches the artefact.
+
+    This matters more than it looks. If Piper clips displace Kokoro ones without
+    being shiftable, the child-range lever's COVERAGE shrinks in proportion, and the
+    likeliest casualty is the 4-year-old that run 13 exists to detect.
 
     Copies are ADDED - see CHILD_STRETCH_FRACTION.
     """
     clips = [p for p in sorted(directory.glob("*.wav"))
-             if p.name.startswith(("kokoro_", "runon_"))]
+             if p.name.startswith(("kokoro_", "runon_", "piper_"))]
     if not clips:
         return 0
 
     written = 0
+    skipped_unknown = 0
     for clip in tqdm(clips, desc=desc, unit="clip"):
         # kokoro_{voice}_{uuid}.wav -> af_bella; the sex is the voice prefix's
-        # second letter (af_/bf_ female, am_/bm_ male).
+        # second letter (af_/bf_ female, am_/bm_ male). Piper clips are named
+        # piper_p{sex}_... so the same index lands on the same thing.
         parts = clip.stem.split("_")
         if len(parts) < 3 or len(parts[1]) != 2:
             continue
         sex = parts[1][1]
+        if sex == "u":
+            skipped_unknown += 1
+            continue
         span = CHILD_STRETCH.get(sex)
         if span is None:
             continue
@@ -168,7 +186,11 @@ def add_child_range_copies(directory: Path, desc: str,
             str(directory / f"vtlp{ratio:.2f}_{clip.name}"), 16000, shifted)
         written += 1
 
-    print(f"  Added {written} pitch/formant-shifted copies of {len(clips)} Kokoro clips")
+    print(f"  Added {written} pitch/formant-shifted copies of {len(clips)} synthetic clips")
+    if skipped_unknown:
+        print(f"  WARNING: {skipped_unknown} clip(s) skipped - voice sex unknown "
+              f"(piper_pu_*). The child-range lever does not cover them; see "
+              f"PIPER_VOICE_SEX in corpus/piper.py.")
     return written
 
 

@@ -37,6 +37,9 @@ from corpus.augment import (CHILD_STRETCH, CHILD_STRETCH_FRACTION,
                             add_child_range_copies, trim_directory, trim_silence)
 from corpus.negatives import (MISPRONOUNCING_VOICES, TRAINING_COMMANDS,
                               build_negative_phrases)
+from corpus.piper import MISPRONOUNCING_PIPER_VOICES, generate_piper_samples
+from corpus.piper import piper_voices as list_piper_voices
+from corpus.piper import voice_sex
 from corpus.real import copy_real_samples
 
 warnings.filterwarnings("ignore", message="Reached EOF prematurely")
@@ -651,6 +654,45 @@ def generate_runon_samples(pool: "KokoroPool", voices: list, output_dir: Path,
 # corpus/real.py and corpus/augment.py, imported above.
 
 
+def select_piper_voices(args, wake_word: str) -> list:
+    """Enumerate Piper voices, drop the ones that say the wrong thing, report cover.
+
+    The exclusion step is the whole point. Six of 42 Kokoro voices mispronounce
+    "hey seeree" and that was ~14% of the synthetic corpus mislabelled as positives
+    for eleven runs before anyone noticed. Piper is not exempt, and with 84 voices
+    available an unaudited list is a bigger exposure, not a smaller one.
+    """
+    safe_name = wake_word.replace(" ", "_").lower()
+    host, _, port = args.piper_url.rpartition(":")
+    try:
+        found = list_piper_voices(host, int(port),
+                                  languages=tuple(args.piper_languages.split(",")),
+                                  max_speakers=args.piper_speakers)
+    except Exception as e:
+        print(f"  ERROR: could not reach Piper at {args.piper_url}: {e}")
+        print("         Start it with `docker compose up -d piper`.")
+        sys.exit(1)
+
+    excluded = set(MISPRONOUNCING_PIPER_VOICES.get(safe_name, []))
+    if not excluded:
+        print(f"  WARNING: no MISPRONOUNCING_PIPER_VOICES entry for '{safe_name}'.")
+        print("           Nothing has been excluded, so any voice whose espeak-ng")
+        print("           g2p guesses the wake word wrong is contributing")
+        print("           MISLABELLED POSITIVES. Six of 42 Kokoro voices did exactly")
+        print("           that (~14% of that corpus). Run audit_voices.py --tts piper,")
+        print("           listen to the shortlist, and fill the list in.")
+
+    kept = [(v, s) for (v, s) in found if v not in excluded]
+    unknown = sum(1 for v, s in kept if voice_sex(v, s) == "u")
+    print(f"  Piper voices: {len(kept)} of {len(found)} "
+          f"({len(found) - len(kept)} excluded as mispronouncing)")
+    if unknown:
+        print(f"  {unknown} of {len(kept)} have no sex in PIPER_VOICE_SEX and will")
+        print(f"  get NO child-range copies - the run-13 lever covers "
+              f"{100 * (len(kept) - unknown) // max(1, len(kept))}% of the Piper set.")
+    return kept
+
+
 def setup_training_dirs(wake_word: str) -> Path:
     """Set up training directory structure."""
     # Convert wake word to safe directory name
@@ -823,6 +865,29 @@ def main():
                              "pitch/formant-shifted copy, to cover child and "
                              "adolescent voices (default: %(default)s). 0 disables "
                              "it, restoring the pre-run-12 adult-only corpus.")
+    parser.add_argument("--piper-fraction", type=float, default=0.0,
+                        help="Fraction of the PHRASE-ALONE positive budget rendered "
+                             "by Piper instead of Kokoro (default: %(default)s = "
+                             "off). SUBSTITUTES rather than adds, so corpus size, "
+                             "the plain/run-on split and real-clip density are all "
+                             "unchanged - which is what makes a comparison against "
+                             "the previous run mean anything. Run-ons stay Kokoro: "
+                             "their cut point comes from Kokoro's word timestamps, "
+                             "and Wyoming has no equivalent, so Piper would fall "
+                             "back to inferring it from a phrase-alone rendering - "
+                             "measured at a median +153 ms late, against a "
+                             "RUNON_TAIL_MS of 150-300 ms. That is run 14's "
+                             "alignment regression waiting to happen.")
+    parser.add_argument("--piper-url",
+                        default=os.environ.get("PIPER_URL", "piper:10200"),
+                        help="Wyoming TTS host:port for Piper (default: %(default)s)")
+    parser.add_argument("--piper-speakers", type=int, default=12,
+                        help="Speakers to sample per multi-speaker Piper voice, "
+                             "evenly spaced (default: %(default)s). "
+                             "en_US-libritts_r-medium alone carries 904, which "
+                             "would swamp the corpus with one model's g2p.")
+    parser.add_argument("--piper-languages", default="en_US,en_GB",
+                        help="Language prefixes to include (default: %(default)s)")
     args = parser.parse_args()
 
     wake_word = args.wake_word
@@ -956,15 +1021,54 @@ def main():
     runon_test = int(args.samples_per_voice // 10 * args.runon_fraction)
     plain_test = args.samples_per_voice // 10 - runon_test
 
+    # Piper SUBSTITUTES for part of the phrase-alone budget rather than adding to it.
+    #
+    # Adding would move three things at once: engine diversity, total corpus size,
+    # and - because real clips are a FRACTION of the positive set - real-clip
+    # density, which run 10 measured as the largest single lever here (run-on
+    # 53% -> 77%). A naive "also generate Piper" over all 84 voices would have taken
+    # real clips from ~17% of positives to ~6%, and the result would have measured
+    # dilution rather than diversity.
+    #
+    # Substituting holds the total, the plain/run-on split, and real-clip density
+    # fixed, leaving one variable: where a share of the phrase-alone clips came from.
+    # Run-ons stay entirely Kokoro - see the --piper-fraction help for why.
+    piper_voices = []
+    kokoro_plain_train, kokoro_plain_test = plain_train, plain_test
+    if args.piper_fraction > 0:
+        piper_voices = select_piper_voices(args, wake_word)
+        if piper_voices:
+            kokoro_plain_train = int(round(plain_train * (1 - args.piper_fraction)))
+            kokoro_plain_test = int(round(plain_test * (1 - args.piper_fraction)))
+            # Budget in TOTAL clips, then spread over however many Piper voices
+            # there are - the two engines do not have the same voice count, so a
+            # per-voice figure would not substitute one-for-one.
+            piper_total_train = (plain_train - kokoro_plain_train) * len(kokoro_voices)
+            piper_total_test = (plain_test - kokoro_plain_test) * len(kokoro_voices)
+            piper_per_voice_train = max(1, piper_total_train // len(piper_voices))
+            piper_per_voice_test = max(1, piper_total_test // len(piper_voices))
+
     print("\n[Kokoro TTS]")
-    print(f"  Per voice: {plain_train} phrase-alone, {runon_train} run-on "
+    print(f"  Per voice: {kokoro_plain_train} phrase-alone, {runon_train} run-on "
           f"({args.runon_fraction:.0%})")
     generate_kokoro_samples(pool, kokoro_voices, pos_train,
-                            plain_train, positive_texts, "Kokoro positive train",
+                            kokoro_plain_train, positive_texts, "Kokoro positive train",
                             args.tts_workers, args.tts_batch)
     generate_kokoro_samples(pool, kokoro_voices, pos_test,
-                            plain_test, positive_texts, "Kokoro positive test",
+                            kokoro_plain_test, positive_texts, "Kokoro positive test",
                             args.tts_workers, args.tts_batch)
+
+    if piper_voices:
+        host, _, port = args.piper_url.rpartition(":")
+        print(f"\n[Piper TTS]  {len(piper_voices)} voices, "
+              f"{piper_per_voice_train} phrase-alone each "
+              f"(~{args.piper_fraction:.0%} of the phrase-alone budget)")
+        generate_piper_samples(host, int(port), piper_voices, pos_train,
+                               piper_per_voice_train, positive_texts,
+                               PLAIN_SPEED_GRID, "Piper positive train")
+        generate_piper_samples(host, int(port), piper_voices, pos_test,
+                               piper_per_voice_test, positive_texts,
+                               PLAIN_SPEED_GRID, "Piper positive test")
 
     if runon_train:
         # One reference cache across both sets: the phrase-alone lengths are the

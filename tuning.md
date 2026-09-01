@@ -191,6 +191,87 @@ repeats carry ~1/6 the novelty of one speed step - which is why raising
 
 ---
 
+## Run 17 as staged: a second TTS engine in the positive corpus
+
+**Not yet run. Blocked on the Piper mispronunciation audit** - see below. Written
+before the measurement so the prediction can be wrong on the record.
+
+### Hypothesis
+
+Voice identity is the dominant diversity axis in this corpus, by a wide margin: the
+embedding distance between two Kokoro voices is ~0.70, while prosody variants of one
+voice span 0.09-0.44 (run 15). `--samples-per-voice` is the weakest lever for the
+same reason - repeats carry ~1/6 the novelty of one speed step. So ~30 more DISTINCT
+speakers from a different engine, with a different vocoder and a different g2p,
+should be worth more than the same number of extra clips from the existing 36.
+
+### Design: substitute, do not add
+
+`--piper-fraction` replaces a share of the phrase-alone budget with Piper, holding
+total clip count, the plain/run-on split, and real-clip density fixed.
+
+Adding instead would have moved three things at once. Real clips are ~17% of
+positives (331 recordings x `--real-copies 10` against ~16k synthetic), and run 10
+measured real-clip density as the largest single lever found here - run-on 53% ->
+77%. Generating all 84 Piper voices on top would have taken real density to ~6%, and
+the run would have measured dilution while appearing to test diversity. That is the
+same shape as the `max_negative_weight` 4000 and 100k-step results, both of which
+looked like model changes and were operating-point shifts.
+
+### Prediction
+
+1. **jay plain improves slightly or not at all.** It is already 94-100% at 8/32; there
+   is little headroom and the failure mode there is not voice coverage.
+2. **jay run-on does not move.** Run-ons stay 100% Kokoro (see below), so the
+   commonest real usage is untouched by this change. If run-on DOES move materially,
+   something other than the intended variable moved.
+3. **ryan is the risk, not the win.** Piper voices with no entry in
+   `PIPER_VOICE_SEX` get no child-range copy, so substituting them for Kokoro clips
+   shrinks the coverage of the run-13 lever. A ryan regression is the most likely way
+   this run does harm, and it is measurable directly: the log prints what fraction of
+   the Piper set has a known sex.
+4. **`extend` false accepts do not move.** Nothing here addresses them, and they have
+   not moved since run 6.
+
+The honest summary of that prediction: a modest gain at best, one specific way to do
+harm. Worth running because the diversity argument is well-supported and cheap to
+test, not because a large effect is expected.
+
+### Two confounds knowingly accepted
+
+**Run-ons stay Kokoro.** Their cut point comes from Kokoro's word timestamps;
+Wyoming has no equivalent, so Piper would use the fallback that infers the boundary
+from a phrase-alone rendering - measured at a median +153 ms late and voice-dependent,
+against a `RUNON_TAIL_MS` of 150-300 ms. That is close to doubling the trailing
+margin, which is exactly the mechanism behind run 14's alignment regression. Not
+worth risking in the same run as the variable being tested.
+
+**Child-range coverage is partial on the Piper side.** Sex is unknown for most of the
+84 voices, and unknown voices are written `piper_pu_*` and skipped rather than shifted
+by a guessed ratio - run 12 measured male voices as "useless above R1.30 (chipmunk)",
+and a wrongly-shifted clip is worse than an absent one. Closing this means listening
+to `voice_audit_piper/` and extending `PIPER_VOICE_SEX`.
+
+### Blocked on: the audit
+
+`MISPRONOUNCING_PIPER_VOICES` is EMPTY. Six of 42 Kokoro voices say something other
+than "hey seeree" - ~14% of that corpus mislabelled, undetected for eleven runs. With
+84 Piper voices the exposure is larger, not smaller. `voice_audit_piper/` holds 252
+renderings but no verdicts.
+
+Piper does make this cheaper than Kokoro: espeak-ng phonemises per MODEL, not per
+speaker, so every speaker inside one voice shares a pronunciation and the decision is
+per model rather than per speaker.
+
+    python audit_voices.py --wake-word "hey seeree" --tts piper \
+        --piper <host>:10200 --asr <host>:10300
+
+Then listen to the shortlist and fill in the list. `train.py` warns loudly if it is
+empty but will not stop - the warning is there because a silent run with a
+mislabelled corpus is the expensive outcome.
+
+---
+
 ## Run 16: `f16d532` — a third speaker, and the run-13 lesson replicates
 
 **No code change affecting training.** `f16d532` is the tflite-conversion commit; its

@@ -46,6 +46,61 @@ from .augment import time_stretch
 
 SR = 16000
 
+# Voices that mispronounce the wake word, per wake word. THE PIPER EQUIVALENT OF
+# MISPRONOUNCING_VOICES IN corpus/negatives.py, AND IT IS NOT OPTIONAL.
+#
+# Six of Kokoro's 42 voices say something other than "hey seeree" - ~14% of that
+# corpus mislabelled as positives. Piper has the same problem for the same reason
+# (the wake word is not a dictionary word, so g2p guesses), with one difference that
+# helps: Piper phonemises with espeak-ng per MODEL, not per speaker, so every speaker
+# inside one voice model shares a pronunciation and the unit to exclude is the whole
+# model (audit_voices.py:148).
+#
+# EMPTY BECAUSE THE AUDIT HAS NOT BEEN COMPLETED. voice_audit_piper/ holds 252
+# renderings of 84 voices but no verdicts. Run audit_voices.py --tts piper to get a
+# ranked shortlist, LISTEN to the shortlist, and fill this in before generating a
+# corpus. An unaudited voice list is how ~14% mislabelled positives got into eleven
+# runs of tuning.md unnoticed.
+MISPRONOUNCING_PIPER_VOICES: dict[str, list[str]] = {
+    "hey_seeree": [],
+}
+
+# Voice sex, for the child-range lever (corpus/augment.py). Keys are Piper voice
+# names; for multi-speaker models the key may also be "voice:speaker".
+#
+# ONLY NAMES THAT STATE IT ARE FILLED IN. The rest are deliberately absent rather
+# than guessed: an unknown voice is written piper_pu_* and simply does not receive a
+# pitch/formant-shifted copy, which costs coverage. Guessing instead would shift some
+# voices by the wrong range, and run 12 measured that male voices are "useless above
+# R1.30 (chipmunk)" - a shifted-wrong clip is worse than an absent one, because
+# training on an artefact teaches the artefact.
+#
+# To extend it: listen, then add. The renderings are already in voice_audit_piper/.
+PIPER_VOICE_SEX: dict[str, str] = {
+    "en_GB-northern_english_male-medium": "m",
+    "en_GB-southern_english_female-low": "f",
+    "en_GB-alba-medium": "f",
+    "en_GB-jenny_dioco-medium": "f",
+    "en_US-amy-medium": "f",
+    "en_US-kathleen-low": "f",
+    "en_US-lessac-medium": "f",
+    "en_US-ryan-medium": "m",
+    "en_US-joe-medium": "m",
+}
+
+
+def voice_sex(voice: str, speaker=None) -> str:
+    """'f', 'm', or 'u' (unknown) for the child-range lever.
+
+    Checked most specific first: a multi-speaker model can hold both sexes, so a
+    "voice:speaker" entry must win over the model-wide one.
+    """
+    if speaker is not None:
+        specific = PIPER_VOICE_SEX.get(f"{voice}:{speaker}")
+        if specific:
+            return specific
+    return PIPER_VOICE_SEX.get(voice, "u")
+
 # The Wyoming JSONL-over-TCP framing: one JSON header line per event, then
 # `data_length` bytes of JSON and `payload_length` bytes of audio.
 #
@@ -165,9 +220,19 @@ def piper_render(host, port, voice, speaker, text, speed=1.0):
     return np.clip(audio, -32768, 32767).astype(np.int16)
 
 
-def generate_piper_samples(host, port, voices, output_dir: Path, texts, speeds,
-                           samples_per_voice=1, desc="Piper"):
-    """Render `texts` across `voices` and `speeds` into `output_dir`.
+def generate_piper_samples(host, port, voices, output_dir: Path,
+                           samples_per_voice: int, texts, speeds, desc="Piper"):
+    """Render `samples_per_voice` clips for each voice into `output_dir`.
+
+    Signature and sampling deliberately mirror train.py's generate_kokoro_samples,
+    so the two are substitutable clip-for-clip: same per-voice budget, same
+    text-offset-per-voice (without which every voice renders texts[0:n] and a list
+    longer than the budget never gets past its own beginning), and the speed drawn
+    from the same grid, in the job-building loop rather than in a worker, so the
+    corpus does not depend on thread scheduling.
+
+    `speeds` is passed in rather than imported: PLAIN_SPEED_GRID lives in train.py
+    and this package must not depend on it.
 
     Filenames are `piper_{voice}_{speaker}_{uuid}.wav`. Note that this does NOT
     match the `kokoro_`/`runon_` prefixes add_child_range_copies looks for, so Piper
@@ -187,13 +252,16 @@ def generate_piper_samples(host, port, voices, output_dir: Path, texts, speeds,
     sharding a multi-voice corpus BY VOICE across instances, never round-robin.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    jobs = [(v, s, t, sp)
-            for (v, s) in voices
-            for t in texts
-            for sp in speeds
-            for _ in range(samples_per_voice)]
+
+    jobs = []
+    for v, (voice, speaker) in enumerate(voices):
+        for i in range(samples_per_voice):
+            text = texts[(v * samples_per_voice + i) % len(texts)]
+            speed = float(np.random.choice(speeds))
+            jobs.append((voice, speaker, text, speed))
 
     written = 0
+    unknown_sex = set()
     for voice, speaker, text, speed in tqdm(jobs, desc=desc, unit="clip"):
         try:
             audio = piper_render(host, port, voice, speaker, text, speed)
@@ -202,10 +270,24 @@ def generate_piper_samples(host, port, voices, output_dir: Path, texts, speeds,
             continue
         if audio.size < 480:
             continue
+
+        # piper_p{sex}_{voice}[_{speaker}]_{uuid}.wav
+        #
+        # The `p{sex}` group is second on purpose: add_child_range_copies reads the
+        # sex from parts[1][1], which is where Kokoro's af_/am_ prefix puts it. Same
+        # position, same code, no special case for the engine.
+        sex = voice_sex(voice, speaker)
+        if sex == "u":
+            unknown_sex.add(voice if speaker is None else f"{voice}:{speaker}")
         tag = f"{voice}_{speaker}" if speaker is not None else voice
-        name = f"piper_{tag}_{uuid.uuid4().hex[:8]}.wav".replace("/", "_")
+        name = f"piper_p{sex}_{tag}_{uuid.uuid4().hex[:8]}.wav".replace("/", "_")
         scipy.io.wavfile.write(str(output_dir / name), SR, audio)
         written += 1
 
     print(f"  Wrote {written} Piper clips from {len(jobs)} jobs")
+    if unknown_sex:
+        print(f"  WARNING: {len(unknown_sex)} voice(s) have no sex in "
+              f"PIPER_VOICE_SEX, so their clips get NO child-range copy: "
+              f"{', '.join(sorted(unknown_sex)[:6])}"
+              f"{' ...' if len(unknown_sex) > 6 else ''}")
     return written
