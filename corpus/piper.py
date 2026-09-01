@@ -39,6 +39,7 @@ meaningful against a single rendering.
 
 import json
 import socket
+import sys
 import uuid
 from pathlib import Path
 
@@ -430,3 +431,45 @@ def generate_piper_samples(host, port, voices, output_dir: Path,
               f"{', '.join(sorted(unknown_sex)[:6])}"
               f"{' ...' if len(unknown_sex) > 6 else ''}")
     return written
+
+
+def select_piper_voices(host, port, wake_word: str, languages=("en_US", "en_GB"),
+                        max_speakers: int = 12) -> list:
+    """Enumerate Piper voices, drop the ones that say the wrong thing, report cover.
+
+    The exclusion step is the whole point. Six of 42 Kokoro voices mispronounce
+    "hey seeree" and that was ~14% of the synthetic corpus mislabelled as positives
+    for eleven runs before anyone noticed. Piper is not exempt, and with 84 voices
+    available an unaudited list is a bigger exposure, not a smaller one.
+    """
+    safe_name = wake_word.replace(" ", "_").lower()
+    try:
+        found = piper_voices(host, int(port), languages=tuple(languages),
+                             max_speakers=max_speakers)
+    except Exception as e:
+        print(f"  ERROR: could not reach Piper at {host}:{port}: {e}")
+        print("         Start it with `docker compose up -d piper`.")
+        sys.exit(1)
+
+    excluded = set(MISPRONOUNCING_PIPER_VOICES.get(safe_name, []))
+    if not excluded:
+        print(f"  WARNING: no MISPRONOUNCING_PIPER_VOICES entry for '{safe_name}'.")
+        print("           Nothing has been excluded, so any voice whose espeak-ng")
+        print("           g2p guesses the wake word wrong is contributing")
+        print("           MISLABELLED POSITIVES. Six of 42 Kokoro voices did exactly")
+        print("           that (~14% of that corpus). Run audit_voices.py --tts piper,")
+        print("           listen to the shortlist, and fill the list in.")
+
+    # Match both forms. The audit scores SPEAKERS - en_US-l2arctic-medium ran from
+    # :ASI at 0% to :PNV at 100% on identical phonemes - so most entries are
+    # "voice:speaker". A bare voice name still excludes the whole model.
+    kept = [(v, s) for (v, s) in found
+            if v not in excluded and f"{v}:{s}" not in excluded]
+    unknown = sum(1 for v, s in kept if voice_sex(v, s) == "u")
+    print(f"  Piper voices: {len(kept)} of {len(found)} "
+          f"({len(found) - len(kept)} excluded as mispronouncing)")
+    if unknown:
+        print(f"  {unknown} of {len(kept)} have no sex in PIPER_VOICE_SEX and will")
+        print(f"  get NO child-range copies - the run-13 lever covers "
+              f"{100 * (len(kept) - unknown) // max(1, len(kept))}% of the Piper set.")
+    return kept

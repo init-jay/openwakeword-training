@@ -37,9 +37,9 @@ from corpus.augment import (CHILD_STRETCH, CHILD_STRETCH_FRACTION,
                             add_child_range_copies, trim_directory, trim_silence)
 from corpus.negatives import (MISPRONOUNCING_VOICES, TRAINING_COMMANDS,
                               build_negative_phrases)
-from corpus.piper import MISPRONOUNCING_PIPER_VOICES, generate_piper_samples
-from corpus.piper import piper_voices as list_piper_voices
-from corpus.piper import voice_sex
+from corpus.piper import generate_piper_samples, select_piper_voices
+from corpus.positives import (PLAIN_SPEED_GRID, PLAIN_SPEEDS,
+                              plain_positive_texts)
 from corpus.real import copy_real_samples
 
 warnings.filterwarnings("ignore", message="Reached EOF prematurely")
@@ -70,17 +70,8 @@ os.chdir(WORK_DIR)
 # RUNON_SPEEDS stays discrete and five long so the fallback path can keep caching
 # its phrase-alone reference per (voice, speed).
 RUNON_SPEEDS = [0.8, 1.0, 1.2, 1.4, 1.6]
-PLAIN_SPEEDS = (0.7, 1.6)
-
-# Batched TTS needs every clip in a request to share one voice AND one speed, so
-# plain speeds are drawn from a grid rather than continuously. 0.05 steps gives 19
-# values across the range - fine enough that the corpus is barely distinguishable
-# from a continuous draw, coarse enough that (voice, speed) buckets hold ~9 clips
-# at the default sample count, which is a usable batch.
-PLAIN_SPEED_STEP = 0.05
-PLAIN_SPEED_GRID = [round(PLAIN_SPEEDS[0] + i * PLAIN_SPEED_STEP, 2)
-                    for i in range(int((PLAIN_SPEEDS[1] - PLAIN_SPEEDS[0])
-                                       / PLAIN_SPEED_STEP) + 1)]
+# PLAIN_SPEEDS, PLAIN_SPEED_STEP and PLAIN_SPEED_GRID now live in
+# corpus/positives.py, imported above - both trainers use the same grid.
 
 # How much of the command's onset to keep after the wake word ends, in ms.
 #
@@ -654,49 +645,6 @@ def generate_runon_samples(pool: "KokoroPool", voices: list, output_dir: Path,
 # corpus/real.py and corpus/augment.py, imported above.
 
 
-def select_piper_voices(args, wake_word: str) -> list:
-    """Enumerate Piper voices, drop the ones that say the wrong thing, report cover.
-
-    The exclusion step is the whole point. Six of 42 Kokoro voices mispronounce
-    "hey seeree" and that was ~14% of the synthetic corpus mislabelled as positives
-    for eleven runs before anyone noticed. Piper is not exempt, and with 84 voices
-    available an unaudited list is a bigger exposure, not a smaller one.
-    """
-    safe_name = wake_word.replace(" ", "_").lower()
-    host, _, port = args.piper_url.rpartition(":")
-    try:
-        found = list_piper_voices(host, int(port),
-                                  languages=tuple(args.piper_languages.split(",")),
-                                  max_speakers=args.piper_speakers)
-    except Exception as e:
-        print(f"  ERROR: could not reach Piper at {args.piper_url}: {e}")
-        print("         Start it with `docker compose up -d piper`.")
-        sys.exit(1)
-
-    excluded = set(MISPRONOUNCING_PIPER_VOICES.get(safe_name, []))
-    if not excluded:
-        print(f"  WARNING: no MISPRONOUNCING_PIPER_VOICES entry for '{safe_name}'.")
-        print("           Nothing has been excluded, so any voice whose espeak-ng")
-        print("           g2p guesses the wake word wrong is contributing")
-        print("           MISLABELLED POSITIVES. Six of 42 Kokoro voices did exactly")
-        print("           that (~14% of that corpus). Run audit_voices.py --tts piper,")
-        print("           listen to the shortlist, and fill the list in.")
-
-    # Match both forms. The audit scores SPEAKERS - en_US-l2arctic-medium ran from
-    # :ASI at 0% to :PNV at 100% on identical phonemes - so most entries are
-    # "voice:speaker". A bare voice name still excludes the whole model.
-    kept = [(v, s) for (v, s) in found
-            if v not in excluded and f"{v}:{s}" not in excluded]
-    unknown = sum(1 for v, s in kept if voice_sex(v, s) == "u")
-    print(f"  Piper voices: {len(kept)} of {len(found)} "
-          f"({len(found) - len(kept)} excluded as mispronouncing)")
-    if unknown:
-        print(f"  {unknown} of {len(kept)} have no sex in PIPER_VOICE_SEX and will")
-        print(f"  get NO child-range copies - the run-13 lever covers "
-              f"{100 * (len(kept) - unknown) // max(1, len(kept))}% of the Piper set.")
-    return kept
-
-
 def setup_training_dirs(wake_word: str) -> Path:
     """Set up training directory structure.
 
@@ -987,34 +935,9 @@ def main():
     # `.lower()` is also gone: it is the same STRING as `wake_word` for a lowercase
     # wake word, so it was a literal duplicate slot.
     #
-    # PUNCTUATION LEAVES A TAIL, AND THE TAIL MOVES THE ALIGNMENT. Run 14 shipped
-    # `...` and `!!` in this list and the alignment peak went 160 -> 200 ms with the
-    # firing floor 80 -> 160 ms, putting median latency at 160 ms against a 120 ms
-    # gate. create_fixed_size_clip aligns the END OF THE ARRAY with the end of the
-    # window (see trim_silence), so anything trailing the phrase - a drawn-out
-    # ending, a breath - displaces the phrase earlier in the window, and the model
-    # learns to wait longer before firing.
-    #
-    # Trailing material surviving trim_silence, vs the plain rendering, median over
-    # 8 voices: `...` +95 ms, `!!` +55 ms, `?` +20 ms, `!` +15 ms, `.` +15 ms,
-    # `,` +10 ms. The two heavy ones are gone. It is strongly voice-dependent -
-    # am_liam and bf_emma add 120-170 ms to EVERY punctuated variant while af_sarah
-    # adds nothing - so this is a property of the corpus as a whole, not of one mark.
-    #
-    # `wake_word` appears twice on purpose. The pre-run-14 list held three
-    # plain-equivalent entries (`wake_word`, `.lower()` which was the same string,
-    # and `.title()` which renders identically), and that is why its alignment was
-    # tight. Weighting plain back up keeps the mean tail near +10 ms, against +30 ms
-    # for run 14's list. Prosody diversity is worth less than alignment: the spread
-    # here is 0.09-0.44 in embedding distance, while a different voice is 0.70.
-    positive_texts = [
-        wake_word,
-        wake_word,
-        f"{wake_word}!",
-        f"{wake_word}?",
-        f"{wake_word},",
-        f"{wake_word}.",
-    ]
+    # The phrase-alone texts, and the tuned speed grid, live in
+    # corpus/positives.py so the microWakeWord corpus renders the same thing.
+    positive_texts = plain_positive_texts(wake_word)
 
     # Negative phrases - see build_negative_phrases for why the confusable ones
     # (near-misses of the wake word) are the important half of this list.
@@ -1050,7 +973,11 @@ def main():
     piper_voices = []
     kokoro_plain_train, kokoro_plain_test = plain_train, plain_test
     if args.piper_fraction > 0:
-        piper_voices = select_piper_voices(args, wake_word)
+        host, _, port = args.piper_url.rpartition(":")
+        piper_voices = select_piper_voices(
+            host, port, wake_word,
+            languages=tuple(args.piper_languages.split(",")),
+            max_speakers=args.piper_speakers)
         if piper_voices:
             kokoro_plain_train = int(round(plain_train * (1 - args.piper_fraction)))
             kokoro_plain_test = int(round(plain_test * (1 - args.piper_fraction)))
