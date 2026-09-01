@@ -82,13 +82,28 @@ services:
     ports:
       - "8881:8880"
 
-  # Deliberately a single instance - see the measurement above. If a re-measure on
-  # the training server shows one instance NOT saturating the cores there, a piper2
-  # on 10201 is a copy of this block with the port changed.
+  # Deliberately a single instance - see the measurement above.
   piper:
     <<: *piper
     ports:
       - "10200:10200"
+    command: ["--uri", "tcp://0.0.0.0:10200", "--data-dir", "/data",
+              "--download-dir", "/data", "--use-cuda"]
+
+  # Second instance, for `bench_tts.py --instances 10200 10201` only. Behind a
+  # profile so it is NOT started by `docker compose up` - on the box this was first
+  # measured on it made throughput worse, and it exists to let that be re-tested
+  # here rather than to be run alongside the first one:
+  #
+  #     docker compose --profile bench up -d piper2
+  #     docker compose --profile bench down piper2
+  #
+  # If it turns out to help on this hardware, move it out of the profile.
+  piper2:
+    <<: *piper
+    profiles: ["bench"]
+    ports:
+      - "10201:10200"
     command: ["--uri", "tcp://0.0.0.0:10200", "--data-dir", "/data",
               "--download-dir", "/data", "--use-cuda"]
 

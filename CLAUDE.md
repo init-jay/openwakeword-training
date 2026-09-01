@@ -76,7 +76,26 @@ python train.py --wake-word "hey cal"
   Client concurrency does not help either. See the note in `docker-compose.yml`.
 - `bench_tts.py` re-measures this for either engine. The numbers in that note came
   from an emulated laptop and are a floor; re-run on the training server before
-  sizing anything: `python bench_tts.py --engine piper --instances 10200 10201`
+  sizing anything. It needs numpy/scipy/tqdm, so the reliable way is inside the
+  trainer container (the host has python3 but not necessarily the deps), reaching
+  the service by its compose name rather than localhost:
+
+```bash
+docker compose up -d piper
+docker compose --profile bench up -d piper2      # only for the --instances test
+docker compose run --rm --no-deps -v $(pwd)/bench_tts.py:/app/bench_tts.py \
+    trainer python3 bench_tts.py --engine piper --host piper --port 10200 \
+    --instances piper:10200 piper2:10200
+docker compose --profile bench down piper2
+```
+
+Inside the compose network the instances are `piper:10200` and `piper2:10200` - the
+`10201` mapping only exists on the host. From the host it would be
+`--instances localhost:10200 localhost:10201` instead, if numpy/scipy/tqdm are
+available there.
+
+```
+```
 - `--use-cuda` is in the compose `command`, so it can be A/B'd without a rebuild.
   Unmeasured, but the case is decent: Piper is genuinely CPU-bound, so offload has
   something to win, unlike Kokoro where the GPU already sat idle at 21%.

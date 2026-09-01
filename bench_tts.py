@@ -93,21 +93,29 @@ def main():
     p.add_argument("--clips", type=int, default=24, help="clips per measurement")
     p.add_argument("--threads", type=int, nargs="+", default=[1, 2, 4, 8],
                    help="client-thread counts to sweep")
-    p.add_argument("--instances", type=int, nargs="+", default=None,
-                   help="piper: ports of several instances, to test whether adding "
-                        "instances adds throughput")
+    p.add_argument("--instances", nargs="+", default=None, metavar="HOST:PORT",
+                   help="piper: several instances, to test whether adding instances "
+                        "adds throughput. Takes 'host:port' or a bare port (which "
+                        "uses --host). Both forms matter: from the host the "
+                        "instances are localhost:10200 and localhost:10201, but on "
+                        "the compose network they are piper:10200 and piper2:10200 "
+                        "- the 10201 mapping does not exist inside it.")
     args = p.parse_args()
+
+    def split(spec):
+        host, sep, port = str(spec).rpartition(":")
+        return (host if sep else args.host), int(port)
 
     if args.engine == "piper":
         voice = args.voice or "en_US-lessac-medium"
-        make = lambda port: piper_caller(args.host, port, voice)
+        make = lambda host, port: piper_caller(host, port, voice)
         target = f"piper {args.host}:{args.port} voice={voice}"
     else:
         voice = args.voice or "af_bella"
-        make = lambda _port: kokoro_caller(args.url, voice)
+        make = lambda _host, _port: kokoro_caller(args.url, voice)
         target = f"kokoro {args.url} voice={voice}"
 
-    call = make(args.port)
+    call = make(args.host, args.port)
     print(f"{target}\nwarming up...")
     for _ in range(3):
         call(0)
@@ -127,16 +135,17 @@ def main():
           "server serialises: more client threads will not help.")
 
     if args.instances and args.engine == "piper":
-        n = args.clips
-        calls = [make(port) for port in args.instances]
+        targets = [split(s) for s in args.instances]
+        calls = [make(h, prt) for h, prt in targets]
         t0 = time.perf_counter()
         with cf.ThreadPoolExecutor(len(calls)) as ex:
-            share = n // len(calls)
+            share = args.clips // len(calls)
             futs = [ex.submit(lambda c=c: [c(i) for i in range(share)]) for c in calls]
             for f in futs:
                 f.result()
         rate = (share * len(calls)) / (time.perf_counter() - t0)
-        print(f"\n{len(calls)} instances {args.instances}, 1 thread each: "
+        shown = ", ".join(f"{h}:{prt}" for h, prt in targets)
+        print(f"\n{len(calls)} instances ({shown}), 1 thread each: "
               f"{rate:.2f} clips/s = {rate / baseline:.2f}x one instance sequential")
         print("Below ~1.0x the instances are contending for the same cores; run one.")
 
