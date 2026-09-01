@@ -123,6 +123,13 @@ available there.
   would drop real clips from ~17% of positives toward ~6%, and real-clip density is
   the largest lever measured here (run 10). Run-ons stay Kokoro: their cut point
   needs word timestamps, which Wyoming does not provide.
+  Run 17 measured this as the largest gain since run 10 — jay run-on 75% → 95% at
+  8/32, ryan plain 83% → 100%, with adversarial false accepts *down*.
+- **Phrase-alone diversity improves RUN-ON detection, not just plain.** Run 17
+  predicted run-on would not move, since run-ons stayed entirely Kokoro. It moved
+  +20 points. Plain positives teach the wake word; run-on positives teach that speech
+  may follow it. Improving the first transfers to the second — so `--runon-fraction`
+  was tuned on an assumption that is now known to be incomplete.
 - **Evaluate every speaker separately, never pooled.** `my_real_samples_holdout/<speaker>/` and `<speaker>_runon/`. A speaker missing from the holdout does not produce a worse number, it produces a confident irrelevant one — that is how the child gap stayed invisible for eleven runs.
 - `max_negative_weight` (`train.py`, currently 2000) is the lever if a larger negative list makes the model too conservative.
 - All audio is 16kHz, 16-bit, mono WAV.

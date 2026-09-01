@@ -6,7 +6,7 @@ measurement said - including the predictions that turned out wrong. It is kept i
 that form deliberately: several conclusions here were reversed by later runs, and the
 reasoning is worth more than the conclusions when picking the next lever.
 
-Sixteen runs against "hey seeree", every number measured rather than estimated.
+Seventeen runs against "hey seeree", every number measured rather than estimated.
 
 ## Current settings and results
 
@@ -21,26 +21,33 @@ Sixteen runs against "hey seeree", every number measured rather than estimated.
     PLAIN_SPEEDS  = (0.7, 1.6)
     MISPRONOUNCING_VOICES         6 of 42 voices say the wrong word - exclude by ear
 
-**Ship candidate: `f16d532`** (run 16) — the first model that covers three speakers.
-Even with `92ac528` on jay and ryan, much better on jen, and back to 0/68 on
-ordinary-speech false accepts. Deploy at **0.15**, not 0.5: at 0.5 ryan loses 33 points
-of plain detection. Its one blemish is a 123 ms median latency against the 120 ms gate -
-a 3 ms miss with no mechanism found behind it; replicate before believing it.
+**Ship candidate: `d1bb9f4`** (run 17) — half the phrase-alone positives rendered by 82
+audited Piper voices instead of Kokoro, SUBSTITUTED rather than added. Best model on
+every speaker at matched precision, best latency measured (80 ms median), fewest
+adversarial false accepts (7/32). Deploy at **0.15**, not 0.5: ryan reads 50% plain at
+0.5 and 100% at 0.15. Its one blemish is 2/68 ordinary false accepts at that
+threshold, against 0/68 for run 16, both on "series"/"seriously" phrases.
 
 Best models at 8/32 adversarial false accepts, on held-out recordings, **scored per
 speaker — never pooled**:
 
 | plain / run-on | jay, adult (35/57) | ryan, age 4 (6/14) | jen (10, plain only) | ryan plain at thr 0.5 |
 |---|---|---|---|---|
-| `f16d532` run 16 | 94% / 84% | 83% / **86%** | **100%** | 67% |
-| `92ac528` run 15 | **100% / 84%** | 83% / **86%** | 70% | **83%** |
-| `66d876e` run 14 | **100% / 84%** | **100% / 86%** | — | 50% |
+| `d1bb9f4` run 17 | **100% / 95%** | **100% / 86%** | **100%** | 50% |
+| `7075c91` gate | 97% / 75% | 83% / 86% | 90% | **83%** |
+| `f16d532` run 16 | 94% / 84% | 83% / 86% | **100%** | 67% |
+| `92ac528` run 15 | **100%** / 84% | 83% / 86% | 70% | **83%** |
+| `66d876e` run 14 | **100%** / 84% | **100%** / 86% | — | 50% |
 | `68b37db` run 13 | 97% / 86% | 83% / 79% | 90% | 67% |
-| `9a938fb` run 11 | **100% / 91%** | 83% / 79% | 80% | 33% |
+| `9a938fb` run 11 | **100%** / 91% | 83% / 79% | 80% | 33% |
 | `2213187` run 12 | 97% / 84% | 50% / 79% | — | 17% |
 
-At the 0.15 deployment threshold, run 16 reads jay 97/84, ryan 100/86, jen 100 plain,
-9/32 adversarial, 0/68 ordinary.
+At the 0.15 deployment threshold, run 17 reads jay 100/91, ryan 100/86, 7/32
+adversarial, 2/68 ordinary.
+
+**Two TTS engines beat one, and the gain was largest where it was predicted to be
+zero.** Run-on went +20 points at 8/32 despite run-ons staying 100% Kokoro. See run 17
+for why that reasoning was wrong, and what it implies for `--runon-fraction`.
 
 Ryan's set is 6 plain and 14 run-on clips - small enough that one clip is 17 points.
 See run 13 for why the result is still credible. **jen has no run-on set at all**, and
@@ -191,6 +198,112 @@ repeats carry ~1/6 the novelty of one speed step - which is why raising
 
 ---
 
+## Run 17: `d1bb9f4` — Piper voices in the corpus. The prediction was wrong twice.
+
+`--piper-fraction 0.5`: half the phrase-alone budget rendered by 82 audited Piper
+voices instead of Kokoro, holding total clips, the plain/run-on split and real-clip
+density fixed. Run-ons stayed 100% Kokoro. The comparator is the gate run `7075c91` -
+identical code, Kokoro only - so the only variable is where half the phrase-alone
+clips came from. Diff confirms it: the only training-behaviour changes are the Piper
+substitution and child-range support for Piper clips.
+
+### It worked, and by more than anything since run 10
+
+| jay, matched adv FA | `d1bb9f4` | gate `7075c91` | `f16d532` | `68b37db` |
+|---|---:|---:|---:|---:|
+| 4/32 | **100/84** | 83/46 | 80/47 | 83/51 |
+| 6/32 | **100/86** | 97/65 | 80/60 | 97/**86** |
+| 8/32 | **100/95** | 97/75 | 94/84 | 97/86 |
+| 10/32 | **100/98** | 97/88 | 100/96 | 100/**98** |
+
+ryan: **100/86** at 8/32 against the gate's 83/86, and 100/93 at 10/32.
+jen: **100%** plain at 4/32 against the gate's 60%.
+
+It dominates at every matched operating point on all three speakers, and adversarial
+false accepts went DOWN at the same time (7/32 against 8/32). Detection and precision
+improving together is normally the signature of an operating-point shift, which is
+why rule 2 exists - but this IS the matched comparison, so it is real separation.
+
+Latency is the best measured: median 80 ms, p90 170 ms. First run to pass three of
+four gates, missing only the `extend` false accepts that nothing has ever moved.
+
+### Prediction 2 was wrong, and it is the interesting part
+
+Staged prediction: "jay run-on does not move. Run-ons stay 100% Kokoro, so the
+commonest real usage is untouched by this change. If run-on DOES move materially,
+something other than the intended variable moved."
+
+**Run-on moved +20 points at 8/32** (75 -> 95), and +38 at 4/32. Nothing else moved:
+the diff is Piper-only and the real corpus is byte-identical.
+
+So the reasoning behind the prediction was wrong. It assumed run-on performance is
+taught by run-on positives. It is not - or not only. The phrase-alone positives teach
+the WAKE WORD; the run-on positives teach that speech may follow it immediately.
+Those are different lessons, and improving voice diversity in the first improves the
+model's representation of the phrase, which the run-on case inherits.
+
+That has a direct consequence worth testing: `--runon-fraction 0.4` was tuned on the
+assumption that run-on detection scales with run-on positives. If phrase diversity is
+the bigger lever, some of that budget may be better spent on phrase-alone clips.
+
+### Prediction 3 was also wrong: ryan improved
+
+Staged prediction was that ryan was the risk, via Piper voices with unknown sex
+losing their child-range copies. That did not happen, because it was designed out
+first: measure_voice_f0.py produced a sex for all 96 audited voices, so all 82
+survivors got child-range copies and the run-13 lever kept full coverage. ryan gained
+17 points of plain detection at 8/32.
+
+The lesson is not "the risk was imaginary" - it is that the risk was real and was
+closed before the run, by measuring F0 instead of listening to 96 voices.
+
+### Piper clips carry ~250 ms of trailing silence
+
+Measured on the audit renderings at 1.0x, against `trim_silence`: median 248 ms
+removed, p90 555 ms, max 1110 ms. Real recordings are 0 ms.
+
+It did no harm because trimming happens before augmentation, which is exactly what
+that stage exists for. But **`--no-trim` with a Piper corpus would be far more
+destructive than with Kokoro**, and wyoming-piper's `--sentence-silence` is the
+likely source if it ever needs controlling at the engine.
+
+### Alignment: a wider band, not a later one
+
+`check_model_alignment.py` reports "peak at 240 ms" and warns about trailing silence.
+**Read the table, not the summary line** - median scores are 0.981-0.986 flat from
+80 ms to 280 ms, so the argmax is noise on a plateau. The real change is the firing
+band widening to 40-400 ms, against 80-280 ms for the gate.
+
+Wider tolerance is consistent with the detection gain, and the 40 ms floor did not
+cost precision - adversarial false accepts are the lowest of any run. Worth watching
+rather than acting on: run 5's failure was a band reaching 0 ms, and it tripled false
+accepts.
+
+### The one regression: ordinary speech at low thresholds
+
+| threshold | jay | ryan | adv FA | ordinary FA |
+|---|---|---|---|---|
+| 0.50 | 100/91 | **50**/86 | 7/32 | **0/68** |
+| 0.25 | 100/91 | **50**/86 | 7/32 | 2/68 |
+| 0.15 | 100/91 | **100**/86 | 7/32 | 2/68 |
+
+`running_024_am_adam` reads 0.490 and `running_020_af_sarah` 0.312 - both the
+"series ... seriously" phrases. Neither fires at 0.5; both do below 0.25. Run 16 read
+0/68 at 0.15.
+
+**Deploy at 0.15.** ryan goes 50% -> 100% plain between 0.25 and 0.15, and a
+4-year-old detected half the time is a worse outcome than two false accepts on an
+adversarial corpus. Validate the two against a long recording of the deployment room
+before committing, as the sweep's own note says.
+
+### Ship candidate: `d1bb9f4`
+
+Best model measured on every speaker at matched precision, best latency, fewest
+adversarial false accepts. The cost is 2/68 ordinary false accepts at the deployment
+threshold, both on phrases containing "series"/"seriously".
+
+---
+
 ## Gate run: `7075c91` — the corpus/ extraction changed nothing it should not have
 
 Not a tuning run. `train.py` was split into a `corpus/` package so a second trainer
@@ -249,7 +362,7 @@ answerable directly, and it is the cheapest unclaimed improvement in the pipelin
 
 ---
 
-## Run 17 as staged: a second TTS engine in the positive corpus
+## Run 17 as it was staged (kept for the prediction — two of four were wrong)
 
 **Not yet run. Blocked on the Piper mispronunciation audit** - see below. Written
 before the measurement so the prediction can be wrong on the record.
