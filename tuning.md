@@ -191,6 +191,64 @@ repeats carry ~1/6 the novelty of one speed step - which is why raising
 
 ---
 
+## Gate run: `7075c91` — the corpus/ extraction changed nothing it should not have
+
+Not a tuning run. `train.py` was split into a `corpus/` package so a second trainer
+can share it (plan.md phase 1), and this run exists only to confirm the split did not
+change the model. Kokoro only - `--piper-fraction` does not even exist in this commit.
+
+**Inputs verified identical before reading any number.** The only functional diff
+against run 16 is the imports plus `copy_real_samples` taking its source directory as
+a parameter instead of reading a module global; everything else in the diff is
+deletion. The moved functions are byte-identical by AST, and `trim_silence`,
+`time_stretch` and `vocal_tract_shift` produce bit-identical output over 60 real
+clips. The real corpus is unchanged at 331 recordings, none added since run 16.
+
+### Result: accepted, with one number below the recent cluster
+
+| jay, matched adv FA | `7075c91` | `f16d532` | `92ac528` | `68b37db` |
+|---|---:|---:|---:|---:|
+| 6/32 | **97**/65 | 80/60 | 86/67 | **97**/**86** |
+| 8/32 | 97/**75** | 94/84 | **100**/84 | 97/**86** |
+| 10/32 | 97/88 | **100**/**96** | 100/88 | 100/**98** |
+
+ryan is identical (83/86 at 8/32, 100/86 at 10/32). jen is 90 plain at 8/32 against
+100, and equal at 10/32. jay plain is fine and better at 6/32.
+
+**jay run-on reads 75 at 8/32, against 84, 84, 84, 86 for runs 13-16.** Nine points
+below a four-run cluster - under the 10-point bar this notebook trusts, but outside
+the spread of every recent run.
+
+It did not move alone. The alignment peak is 200 ms and median latency 136 ms, both at
+the worse end of the observed range, and the two are mechanistically consistent: a
+model expecting 200 ms of post-phrase context has least of it in a run-on, where the
+command starts immediately.
+
+Judged close enough, and not replicated. The reasoning: the code is provably
+equivalent and the inputs are unchanged, and a broken extraction would fail
+differently - a dropped corpus stage would hit all three speakers, not run-on alone
+with ryan untouched.
+
+### What this run says about run 14
+
+Run 14's 200 ms peak was attributed to punctuation tails in `positive_texts`, and run
+15 removed them. **This run has the fix and peaks at 200 ms anyway.** Across runs
+13-17 the peak has read 160 / 200 / 120 / 160 / 200 ms on the same configuration, so
+200 ms clearly occurs without the tails. The tail effect was measured directly and is
+real; what is not supported is that it explains the whole of run 14's peak.
+
+### The measurement this repo cannot make
+
+`train.py` sets no seed, so every run draws a different corpus and no two runs are
+comparable except statistically. Two comments in it - at the plain and run-on job
+builders - already describe the design as keeping "the corpus a function of the seed
+alone", but nothing ever sets one and there is no `--seed` flag.
+
+That is why the 9-point question above costs a 16-minute rerun instead of being
+answerable directly, and it is the cheapest unclaimed improvement in the pipeline.
+
+---
+
 ## Run 17 as staged: a second TTS engine in the positive corpus
 
 **Not yet run. Blocked on the Piper mispronunciation audit** - see below. Written

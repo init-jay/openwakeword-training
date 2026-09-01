@@ -57,6 +57,20 @@ trap cleanup EXIT
 echo "=== $(date '+%H:%M:%S')  building trainer image"
 docker compose build trainer
 
+# Piper, only when the run actually asks for it. Unlike Kokoro it is NOT stopped
+# before training: it runs CPU-only (--use-cuda measured 2.5x slower, see
+# docker-compose.yml), so it holds no CUDA context and none of the VRAM that the
+# GPU-resident feature patch needs. That is the whole reason the Kokoro dance below
+# exists, and it does not apply here.
+WANTS_PIPER=""
+for arg in "$@"; do
+    [[ "$arg" == --piper-fraction* ]] && WANTS_PIPER=1
+done
+if [[ -n "$WANTS_PIPER" ]]; then
+    echo "=== $(date '+%H:%M:%S')  starting Piper"
+    docker compose up -d piper
+fi
+
 echo "=== $(date '+%H:%M:%S')  starting Kokoro"
 docker compose up -d kokoro kokoro2
 
@@ -71,6 +85,18 @@ for name in kokoro:8880 kokoro2:8881; do
     done
 done
 echo "=== $(date '+%H:%M:%S')  Kokoro ready"
+
+# Piper speaks Wyoming over TCP, not HTTP, so readiness is a connect check rather
+# than a curl. Waiting matters as much as it does for Kokoro: the container binds
+# the port only after loading its default voice, and train.py's voice enumeration
+# would otherwise fail against a container that is up but not yet serving.
+if [[ -n "$WANTS_PIPER" ]]; then
+    for _ in $(seq 1 60); do
+        (exec 3<>/dev/tcp/localhost/10200) 2>/dev/null && { exec 3<&-; break; }
+        sleep 2
+    done
+    echo "=== $(date '+%H:%M:%S')  Piper ready"
+fi
 
 # Generation and feature computation. Kokoro is needed for the first, and the GPU
 # headroom it occupies is harmless until training starts.
