@@ -106,7 +106,30 @@ Do not build anything reusable in this phase.
 
 ## Phase 1 - shared corpus layer (2-3 days)
 
-**Status: extraction done, Piper generator working against a live server, gate not yet run.**
+**Status: DONE as scoped — extraction, Piper generator, gate all complete. Two caveats
+below, and note this phase ran out of order.**
+
+The gate ran as `7075c91` and was accepted: jay run-on read 9 points below the
+four-run cluster, ryan identical, jen equal at 10/32, with plain detection better.
+Judged close enough on the strength of the code equivalence rather than replicated -
+see the gate section in tuning.md, including why no seed makes that question
+expensive to answer properly.
+
+Then the Piper generator earned its keep immediately and outside this plan's scope:
+run 17 (`d1bb9f4`) put 82 audited Piper voices into the openWakeWord corpus and
+measured the largest gain since run 10 - jay run-on 75% -> 95% at 8/32, ryan plain
+83% -> 100%, adversarial false accepts down. The shared corpus layer is therefore
+proven useful to the trainer that already existed, independent of microWakeWord.
+
+**Caveat 1: "both trainers consume WAV directories" is only half-tested.** There is
+still only one trainer. `corpus/` is proven against openWakeWord; whether its shape
+fits microWakeWord's SpectrogramGeneration is unverified, because phase 0 never ran.
+
+**Caveat 2: this phase ran BEFORE phase 0 and phase 3's interface, inverting the
+order this plan argued for.** The reasoning for that order was that mWW's data layout
+should constrain the corpus layer's design, and that models are cheap while
+trustworthy measurement is not. Nothing has gone wrong yet, but the risk it named is
+still open: `corpus/` may need rework once mWW is actually attempted.
 
 Done: `corpus/augment.py` (trimming, child-range copies), `corpus/real.py`,
 `corpus/negatives.py`, `corpus/piper.py`. `train.py` imports them and defines none of
@@ -147,9 +170,10 @@ samples durations per call - three calls at 1.0/1.6/0.7 gave 0.964 s/0.501 s/1.1
 which is not the 1.6x it looks like. Compare stretch ratios on one clip, not across
 calls. Same stochasticity `audit_voices.py` documents.
 
-Still to do: **the gate below**. Also untested: `--use-cuda` itself, which needs a
-GPU host - and per the note in docker-compose.yml is a flag to measure rather than
-assume.
+`--use-cuda` was measured on the training server and REMOVED: CUDA runs but makes
+Piper 2.5x slower (17.45 clips/s CPU against 7.00), because ORT splits the VITS graph
+and pays 28 host<->device copies per inference. One CPU instance, no second instance
+(0.60x). See docker-compose.yml for the numbers.
 
 Extract the frontend-agnostic functions from `train.py` into `corpus/`, add a Piper
 generator beside `KokoroPool`, and make both trainers consume WAV directories.
