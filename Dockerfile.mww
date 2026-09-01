@@ -1,0 +1,58 @@
+# microWakeWord trainer - the ESP32 target (plan.md phase 2).
+#
+# SEPARATE FROM THE openWakeWord IMAGE ON PURPOSE, and not by preference: mWW's
+# setup.py requires `numpy>=2.0` while requirements.txt here pins `numpy<2` for
+# openWakeWord and torch. They cannot coexist in one environment. That turns out to be
+# the better arrangement anyway - it keeps a numpy-2 TensorFlow stack away from the
+# image whose behaviour seventeen runs of tuning.md are calibrated against.
+#
+# Base is the TensorFlow GPU image rather than nvidia/cuda + pip tensorflow, because
+# the CUDA/cuDNN pairing is already solved in it, and because it is the stack proven
+# on this training server. Contrast Dockerfile.piper, which needs a cuDNN base only
+# because onnxruntime-gpu has nothing else to borrow from - see the note there.
+
+FROM tensorflow/tensorflow:2.21.0-gpu
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# microWakeWord is not on PyPI - installed from the repo. Pinned to a commit rather
+# than main so a rebuild does not silently change the trainer underneath a run, the
+# way an unpinned openwakeword clone would have.
+ARG MWW_REF=main
+RUN git clone https://github.com/OHF-Voice/micro-wake-word /opt/micro-wake-word \
+    && cd /opt/micro-wake-word \
+    && git checkout "$MWW_REF" \
+    && git rev-parse HEAD > /opt/mww-commit.txt \
+    && pip install --no-cache-dir -e .
+
+# Fail the build rather than a training run if the stack does not import. pymicro-
+# features is the one most likely to be missing a wheel: it is a compiled extension,
+# and upstream's own notebook installs a fork of it for macOS.
+RUN python3 -c "\
+import numpy, tensorflow as tf; \
+print('tensorflow', tf.__version__, 'numpy', numpy.__version__); \
+assert numpy.__version__.split('.')[0] == '2', 'mWW needs numpy 2.x'" \
+    && python3 -c "import pymicro_features; print('pymicro-features OK')" \
+    && python3 -c "from mmap_ninja.ragged import RaggedMmap; print('mmap_ninja OK')" \
+    && python3 -c "\
+from microwakeword.audio.clips import Clips; \
+from microwakeword.audio.spectrograms import SpectrogramGeneration; \
+from microwakeword.audio.augmentation import Augmentation; \
+print('microwakeword OK, pinned at', open('/opt/mww-commit.txt').read().strip())"
+
+# The corpus layer is shared with the openWakeWord trainer - same 16 kHz mono WAVs,
+# different frontend downstream. mWW reads them through Clips(input_directory, ...),
+# so nothing needs converting.
+COPY corpus/ ./corpus/
+COPY mww/ ./mww/
+COPY setup-mww-data.sh .
+RUN chmod +x setup-mww-data.sh
+
+RUN python3 -c "import corpus.augment, corpus.negatives, corpus.real, corpus.piper"

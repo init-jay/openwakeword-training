@@ -188,9 +188,64 @@ inside the noise band on jay/ryan/jen. If it does not, the extraction changed so
 
 ## Phase 2 - mWW training backend (3-5 days)
 
-Wire `corpus/` output through `SpectrogramGeneration` into the ragged mmap layout, plus
-a YAML config generator mirroring `create_config` (`train.py:1073`), and manifest
-emission.
+**The design below was written from the README and is WRONG in one important way.
+Corrected after reading the source (2026-09-02, OHF-Voice/micro-wake-word@main).**
+
+### What reading the source changed
+
+**1. There is no mmap step for our own corpus.** A feature set in the training YAML
+takes a `type`, and it can be `clips` as well as `mmap` (`data.py:405-452`):
+
+    type: clips
+    clips_settings:                   -> Clips(**)
+    augmentation_settings:            -> Augmentation(**)
+    spectrogram_generation_settings:  -> SpectrogramGeneration(**)
+
+`Clips(input_directory, file_pattern, ...)` reads **a directory of audio files with a
+glob**. So `corpus/` output feeds microWakeWord directly and spectrograms are generated
+on the fly. The RaggedMmap layout - `<dir>/{training,validation,testing,
+testing_ambient,validation_ambient}/**/*_mmap/` - is still how the pre-generated
+NEGATIVE sets from Hugging Face arrive, so both types appear in one config, but nothing
+we generate needs converting. That deletes most of what this phase was scoped to build.
+
+**2. The augmentation corpora are the ones already downloaded.** `Augmentation` takes
+`impulse_paths` and `background_paths`, which is `data/mit_rirs`, `data/audioset_16k`
+and `data/fma` from `setup-data.sh`. Its default probabilities are near-identical to
+openWakeWord's (AddBackgroundNoise 0.75, RIR 0.5).
+
+**3. The derived config values are computed by the trainer, not by us.**
+`spectrogram_length`, `spectrogram_length_final_layer`, `training_input_shape` and
+`stride` are all filled in by `model_train_eval.py:60-93` from `clip_duration_ms`,
+`window_step_ms` and the model flags. The generator only writes authored keys.
+
+**4. mWW CANNOT share the trainer image.** Its `setup.py` requires `numpy>=2.0`;
+`requirements.txt` here pins `numpy<2` for openWakeWord and torch. Also
+`tensorflow>=2.18`, `pymicro-features`, `mmap_ninja`, `webrtcvad-wheels`,
+`ai-edge-litert`. So a separate `Dockerfile.mww`, which is also cleaner - it keeps a
+numpy-2 TensorFlow stack away from the image whose behaviour seventeen runs depend on.
+
+### Revised scope
+
+- `Dockerfile.mww` + an `mww` compose service. Base on `tensorflow/tensorflow:*-gpu`,
+  which is the stack already proven on this training server.
+- `mww/config.py` - emit the training YAML: `type: clips` feature sets pointing at
+  `corpus/` output, `type: mmap` sets for the downloaded ambient negatives.
+- A fetch step for the Hugging Face negative sets (`dinner_party`, `no_speech`,
+  `speech` and their `_eval` variants) - the one genuinely large download.
+- `mww/manifest.py` - the ESPHome JSON, carrying `probability_cutoff` and
+  `sliding_window_size`.
+
+Start from the notebook's config verbatim - `MixedNet`, pointwise filters 64x4,
+mixconv kernels `[5],[7,11],[9,15],[23]`, 10000 steps, batch 128, negative class
+weight 20 - and change one thing at a time, `tuning.md` style.
+
+**The negatives need thought, not just concatenation.** mWW trains against large
+pre-generated negative spectrogram sets (`dinner_party`, `speech`, `no_speech`). This
+repo's adversarial negatives are ~100 clips. Dropped into a set that size they are a
+rounding error, and `extend` false accepts - unsolved here at 6-8/32 across every run
+since run 6 - is exactly what they exist to fix. The `sampling_weight` and
+`penalty_weight` per feature set are the levers, and they are per-set, which is a
+better instrument than openWakeWord's single `max_negative_weight`.
 
 Start from the notebook's config verbatim - `MixedNet`, pointwise filters 64x4,
 mixconv kernels `[5],[7,11],[9,15],[23]`, 10000 steps, batch 128, negative class

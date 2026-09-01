@@ -155,6 +155,30 @@ services:
     command: ["--uri", "tcp://0.0.0.0:10200", "--data-dir", "/data",
               "--download-dir", "/data", "--voice", "en_US-lessac-medium"]
 
+  # microWakeWord trainer, for the ESP32 target (plan.md phase 2). A SEPARATE image
+  # from `trainer` because mWW requires numpy>=2 and this repo pins numpy<2 for
+  # openWakeWord and torch - they cannot share an environment. See Dockerfile.mww.
+  #
+  # No depends_on: the corpus is built by the openWakeWord side or by corpus/ directly,
+  # and this service only reads directories. Start it explicitly.
+  mww:
+    build:
+      context: .
+      dockerfile: Dockerfile.mww
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - ./data:/app/data                    # mit_rirs, audioset_16k, fma, ambient sets
+      - ./my_real_samples:/app/my_real_samples
+      - ./mww_corpus:/app/mww_corpus        # generated WAVs, shared corpus layer
+      - ./mww_models:/app/mww_models        # trained tflite + manifest
+    shm_size: "8gb"
+
   trainer:
     build: .
     deploy:
