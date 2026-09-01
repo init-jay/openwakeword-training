@@ -252,13 +252,22 @@ OpenWakeWord's `create_fixed_size_clip` aligns the **end of the array** with the
 
 ```
 my_custom_model/
-├── hey_cal.onnx          # Your trained model - use this!
+├── hey_cal.onnx              # Your trained model - use this!
 └── hey_cal/
-    ├── positive_train/   # Generated training samples
-    ├── positive_test/    # Test samples
-    ├── negative_train/   # Negative training samples
-    └── negative_test/    # Negative test samples
+    ├── hey_cal_<commit>.onnx # Archived per run by run-training.sh
+    ├── oww/                  # openWakeWord corpus - REBUILT EVERY RUN
+    │   ├── positive_train/   # Generated training samples
+    │   ├── positive_test/    # Test samples
+    │   ├── negative_train/   # Negative training samples
+    │   └── negative_test/    # Negative test samples
+    └── mww/                  # microWakeWord corpus (mww/corpus.py)
+        ├── positives/
+        └── negatives/
 ```
+
+The two corpora are siblings so neither trainer reaches into the other's directory.
+That matters: `setup_training_dirs()` deletes `oww/` at the start of every run, and
+before this nesting it deleted the archived `.onnx` files alongside it.
 
 ## Using Your Model
 

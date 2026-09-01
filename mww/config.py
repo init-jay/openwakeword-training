@@ -120,8 +120,14 @@ def build(wake_word, positives_dir, negatives_dir, ambient_dirs, output_dir,
     background = [data / Path(p).name for p in BACKGROUND_DIRS]
 
     features = [
-        # Positives from corpus/: Kokoro + Piper + real recordings, already trimmed
-        # and already carrying the child-range copies.
+        # Positives from mww/corpus.py: synthetic voices plus real recordings,
+        # trimmed and carrying the child-range copies, in mWW's own directory.
+        #
+        # Real recordings are NOT duplicated here the way --real-copies duplicates
+        # them for openWakeWord. That trick exists because openWakeWord augments by
+        # globbing the directory once, so N copies become N augmented variants. mWW
+        # augments on every read, so copies would only bias sampling - and
+        # `sampling_weight` below is the honest knob for that. See corpus/real.py.
         clips_feature_set(positives_dir, truth=True, sampling_weight=2.0,
                           penalty_weight=1.0, impulse_dirs=impulse,
                           background_dirs=background),
@@ -162,8 +168,15 @@ def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--wake-word", default="hey seeree")
-    p.add_argument("--positives", default="mww_corpus/positives")
-    p.add_argument("--negatives", default="mww_corpus/negatives")
+    # mWW owns its corpus, built by mww/corpus.py. Reading the openWakeWord one in
+    # place was tried and rejected: train.py rmtree's it at the start of every run.
+    p.add_argument("--positives", default=None,
+                   help="default: <corpus-root>/<wake_word>/mww/positives")
+    p.add_argument("--negatives", default=None,
+                   help="default: <corpus-root>/<wake_word>/mww/negatives")
+    p.add_argument("--corpus-root", default="my_custom_model",
+                   help="corpora live at <root>/<wake_word>/{oww,mww}/ "
+                        "(default: %(default)s)")
     p.add_argument("--ambient", nargs="*", default=[],
                    help="RaggedMmap feature dirs for the ambient negatives")
     p.add_argument("--data-dir", default=".",
@@ -174,7 +187,19 @@ def main():
     p.add_argument("--out", default="training_parameters.yaml")
     args = p.parse_args()
 
-    cfg = build(args.wake_word, args.positives, args.negatives, args.ambient,
+    safe = args.wake_word.replace(" ", "_").lower()
+    corpus = Path(args.corpus_root) / safe / "mww"
+    positives = Path(args.positives) if args.positives else corpus / "positives"
+    negatives = Path(args.negatives) if args.negatives else corpus / "negatives"
+
+    for label, d in (("positives", positives), ("negatives", negatives)):
+        n = len(list(d.glob("*.wav"))) if d.is_dir() else 0
+        print(f"  {label:<10} {d}  ({n} wav)")
+        if n == 0:
+            print("           EMPTY OR MISSING. Build it first:")
+            print(f'             python -m mww.corpus --wake-word "{args.wake_word}"')
+
+    cfg = build(args.wake_word, positives, negatives, args.ambient,
                 args.output_dir, data_dir=args.data_dir,
                 training_steps=args.training_steps, batch_size=args.batch_size)
     Path(args.out).write_text(yaml.safe_dump(cfg, sort_keys=False))

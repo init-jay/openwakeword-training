@@ -698,10 +698,20 @@ def select_piper_voices(args, wake_word: str) -> list:
 
 
 def setup_training_dirs(wake_word: str) -> Path:
-    """Set up training directory structure."""
-    # Convert wake word to safe directory name
+    """Set up training directory structure.
+
+    my_custom_model/<wake_word>/oww/ - one level deeper than it used to be, so the
+    microWakeWord corpus can live beside it under .../mww/ without either pipeline
+    reaching into the other's directory.
+
+    THE NESTING ALSO FIXES A REAL BUG. This function rmtree's its base directory, and
+    that used to be my_custom_model/<wake_word> - the same directory run-training.sh
+    copies the commit-tagged models into. Every run therefore deleted the archive of
+    every previous run, which is survivable only because the models were being
+    copied off the box by hand. Scoped to .../oww/, the archives outlive the run.
+    """
     safe_name = wake_word.replace(" ", "_").lower()
-    base_dir = WORK_DIR / "my_custom_model" / safe_name
+    base_dir = WORK_DIR / "my_custom_model" / safe_name / "oww"
 
     if base_dir.exists():
         print("Clearing previous training outputs...")

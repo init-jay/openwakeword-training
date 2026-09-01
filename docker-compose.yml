@@ -175,7 +175,11 @@ services:
     volumes:
       - ./data:/app/data                    # mit_rirs, audioset_16k, fma, ambient sets
       - ./my_real_samples:/app/my_real_samples
-      - ./mww_corpus:/app/mww_corpus        # generated WAVs, shared corpus layer
+      # Both corpora live under my_custom_model/<wake_word>/, one directory per
+      # trainer: .../oww/ written by train.py, .../mww/ written by mww/corpus.py.
+      # Neither reaches into the other's, which matters because train.py rmtree's
+      # its own directory at the start of every run.
+      - ./my_custom_model:/app/my_custom_model
       - ./mww_models:/app/mww_models        # trained tflite + manifest
     shm_size: "8gb"
 

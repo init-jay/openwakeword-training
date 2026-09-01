@@ -10,7 +10,7 @@ before committing to a multi-hour training run.
 
 Usage:
     python check_alignment.py my_real_samples/
-    python check_alignment.py my_custom_model/hey_cal/positive_train --verbose
+    python check_alignment.py my_custom_model/hey_cal/oww/positive_train --verbose
     python check_alignment.py my_real_samples/ --total-length 32000
 
 Only needs numpy + scipy, so it runs on the host where you record.
