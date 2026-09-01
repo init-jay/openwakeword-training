@@ -10,6 +10,8 @@ Local training pipeline for custom OpenWakeWord wake word models. Uses Kokoro TT
 
 ### Docker (recommended)
 ```bash
+# REBUILD AFTER PULLING: train.py now imports the corpus/ package, so an image
+# built before it existed fails with ModuleNotFoundError: No module named 'corpus'.
 docker compose build trainer                  # Build training image
 docker compose run --rm trainer ./setup-data.sh  # Download ~17GB training data
 docker compose run --rm trainer python train.py --wake-word "hey cal" --data-dir /app/data
@@ -81,12 +83,15 @@ python train.py --wake-word "hey cal"
   the service by its compose name rather than localhost:
 
 ```bash
-docker compose up -d piper
-docker compose --profile bench up -d piper2      # only for the --instances test
-docker compose run --rm --no-deps -v $(pwd)/bench_tts.py:/app/bench_tts.py \
+docker compose --profile bench up -d piper piper2   # piper2 only for --instances
+docker compose ps                                   # both should say "running"
+docker compose run --rm --no-deps \
+    -v $(pwd)/bench_tts.py:/app/bench_tts.py -v $(pwd)/corpus:/app/corpus \
     trainer python3 bench_tts.py --engine piper --host piper --port 10200 \
     --instances piper:10200 piper2:10200
-docker compose --profile bench down piper2
+docker compose --profile bench stop piper2          # stop, NOT down - `down` is
+                                                    # project-scoped and takes the
+                                                    # network (and piper) with it
 ```
 
 Inside the compose network the instances are `piper:10200` and `piper2:10200` - the

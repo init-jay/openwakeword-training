@@ -111,6 +111,11 @@ Do not build anything reusable in this phase.
 Done: `corpus/augment.py` (trimming, child-range copies), `corpus/real.py`,
 `corpus/negatives.py`, `corpus/piper.py`. `train.py` imports them and defines none of
 it any more; `Dockerfile` copies the package and fails the build if it does not import.
+
+**This makes the trainer image mandatory to rebuild.** `train.py` now imports
+`corpus`, so any image built before the package existed dies with
+`ModuleNotFoundError: No module named 'corpus'` - at import, before any of the
+expensive setup. `docker compose build trainer`.
 `Dockerfile.piper` + the `piper`/`piper2` compose services host Piper with the GPU
 available - built rather than pulled, because rhasspy/wyoming-piper is debian-slim
 with CPU onnxruntime and cannot use a GPU at all.

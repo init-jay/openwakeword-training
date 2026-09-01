@@ -117,8 +117,23 @@ def main():
 
     call = make(args.host, args.port)
     print(f"{target}\nwarming up...")
-    for _ in range(3):
-        call(0)
+    try:
+        for _ in range(3):
+            call(0)
+    except (OSError, ConnectionError) as e:
+        # A raw gaierror/ECONNREFUSED here is nearly always one of two setup
+        # mistakes, and the traceback says neither of them out loud.
+        sys.exit(
+            f"\nCould not reach {args.host}:{args.port} - {e}\n\n"
+            "  * Is the service up?  `docker compose ps` should show it running.\n"
+            "    Start it with `docker compose up -d piper` (add `--profile bench`\n"
+            "    and piper2 for the --instances test). Note `docker compose down\n"
+            "    <service>` tears down the network too - use `stop`.\n"
+            "  * Are you using the right names for where this is running?\n"
+            "    Inside the compose network:  --host piper   --instances piper:10200 "
+            "piper2:10200\n"
+            "    From the host:               --host localhost "
+            "--instances localhost:10200 localhost:10201\n")
 
     print(f"\n{args.clips} clips per row\n")
     print(f"{'mode':<16}{'clips/s':>9}{'RTF':>8}{'med ms':>9}{'p90 ms':>9}")
