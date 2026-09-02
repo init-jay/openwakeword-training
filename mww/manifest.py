@@ -29,8 +29,8 @@ silently moves the operating point.
 FEATURE_STEP_SIZE MUST MATCH TRAINING. It is how often ESPHome's preprocessor emits
 a feature vector, and the model was trained on features at `window_step_ms`. A
 mismatch feeds the model a different time base than it learned - it will not error,
-it will just detect badly. Published models often show 10 because they were trained
-that way; this repo trains at 20.
+it will just detect badly. Emitted from mww.config.WINDOW_STEP_MS so the two cannot
+drift: change the training step and the manifest follows.
 
 TENSOR_ARENA_SIZE IS A GUESS AND HAS TO BE CHECKED ON DEVICE. It is the working
 memory TFLite Micro allocates, and it cannot be computed here - it depends on the
@@ -61,6 +61,12 @@ SLIDING_WINDOW_SIZE = 5
 # if it is too small.
 DEFAULT_TENSOR_ARENA_SIZE = 30000
 MINIMUM_ESPHOME_VERSION = "2024.7.0"
+
+# Attribution, shown by ESPHome and by Home Assistant's wake-word picker. Defaults
+# rather than flags because a manifest without them is an anonymous model, and the
+# one thing nobody remembers to pass is the one that identifies who built it.
+DEFAULT_AUTHOR = "init-jay"
+DEFAULT_WEBSITE = "https://github.com/init-jay/openwakeword-training-gpu"
 
 ROC_LINE = re.compile(r"Cutoff\s+([\d.]+)\s*:\s*frr\s*=\s*([\d.]+)\s*;\s*faph\s*=\s*([\d.]+)")
 
@@ -101,8 +107,8 @@ def main():
     p.add_argument("--max-faph", type=float, default=0.0,
                    help="false accepts per hour budget (default: %(default)s)")
     p.add_argument("--tensor-arena-size", type=int, default=DEFAULT_TENSOR_ARENA_SIZE)
-    p.add_argument("--author", default=None)
-    p.add_argument("--website", default=None)
+    p.add_argument("--author", default=DEFAULT_AUTHOR)
+    p.add_argument("--website", default=DEFAULT_WEBSITE)
     p.add_argument("--version", type=int, default=2)
     p.add_argument("--languages", default="en")
     args = p.parse_args()
@@ -130,6 +136,8 @@ def main():
     manifest = {
         "type": "micro",
         "wake_word": args.wake_word,
+        "author": args.author,
+        "website": args.website,
         "model": model.name,
         "trained_languages": args.languages.split(","),
         "version": args.version,
@@ -143,11 +151,6 @@ def main():
             "minimum_esphome_version": MINIMUM_ESPHOME_VERSION,
         },
     }
-    if args.author:
-        manifest["author"] = args.author
-    if args.website:
-        manifest["website"] = args.website
-
     out = run_dir / f"{safe}.json"
     out.write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"\nwrote {out}")
