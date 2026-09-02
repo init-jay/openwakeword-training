@@ -20,8 +20,10 @@ Everything after --  is passed through to microwakeword.model_train_eval.
 
 import argparse
 import hashlib
+import shutil
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -95,6 +97,18 @@ def check_mmap_set(d: Path):
             f"cannot see)"]
 
 
+def run_tag():
+    """Name this run after the commit that produced it, as run-training.sh does."""
+    try:
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, check=True)
+        tag = out.stdout.strip()
+        dirty = subprocess.run(["git", "diff", "--quiet"]).returncode != 0
+        return tag + ("-dirty" if dirty else "")
+    except Exception:
+        return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
 def checksum(path: Path):
     return hashlib.md5(path.read_bytes()).hexdigest() if path.is_file() else None
 
@@ -110,6 +124,13 @@ def main():
     p.add_argument("--output-dir", default="mww_models")
     p.add_argument("--training-steps", type=int, nargs="+")
     p.add_argument("--batch-size", type=int, default=mww_config.DEFAULT_BATCH_SIZE)
+    p.add_argument("--tag", default=None,
+                   help="name for this run's output directory (default: the git "
+                        "short commit, or a timestamp outside a repo). Each run "
+                        "gets its own - model_train_eval refuses to train into an "
+                        "existing directory.")
+    p.add_argument("--force", action="store_true",
+                   help="delete this run's output directory if it already exists")
     p.add_argument("--config", default=None,
                    help="use an existing YAML instead of generating one")
     p.add_argument("--model", default=MODEL, choices=("mixednet", "inception"),
@@ -133,8 +154,13 @@ def main():
         cfg = mww_config.build(
             args.wake_word, corpus / "positives", corpus / "negatives",
             args.ambient, args.output_dir, data_dir=args.data_dir,
-            training_steps=args.training_steps, batch_size=args.batch_size)
-        config_path = Path(args.output_dir) / safe / "training_parameters.yaml"
+            training_steps=args.training_steps, batch_size=args.batch_size,
+            run_tag=args.tag or run_tag())
+        # SIBLING OF train_dir, NOT INSIDE IT. model_train_eval calls
+        # os.makedirs(train_dir) and fails if anything is there - a config file
+        # written into it is enough to stop the run.
+        train_dir = Path(cfg["train_dir"])
+        config_path = train_dir.with_suffix(".yaml")
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
         print(f"wrote {config_path}")
@@ -160,6 +186,14 @@ def main():
         sys.exit(1)
 
     train_dir = Path(cfg["train_dir"])
+    if train_dir.exists():
+        if args.force:
+            print(f"removing existing {train_dir}")
+            shutil.rmtree(train_dir)
+        else:
+            sys.exit(f"\n{train_dir} already exists, and model_train_eval will not "
+                     f"train into it.\nUse --tag NAME for a fresh directory, or "
+                     f"--force to delete this one.")
     model_path = train_dir / SHIPPED[0] / SHIPPED[1]
     before = checksum(model_path)
 

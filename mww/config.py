@@ -113,7 +113,7 @@ def mmap_feature_set(features_dir, truth, sampling_weight, penalty_weight,
 
 def build(wake_word, positives_dir, negatives_dir, ambient_dirs, output_dir,
           data_dir=".", training_steps=None, learning_rates=None,
-          batch_size=DEFAULT_BATCH_SIZE, negative_class_weight=None):
+          batch_size=DEFAULT_BATCH_SIZE, negative_class_weight=None, run_tag=None):
     safe = wake_word.replace(" ", "_").lower()
     data = Path(data_dir)
     impulse = [data / Path(p).name for p in IMPULSE_DIRS]
@@ -158,8 +158,16 @@ def build(wake_word, positives_dir, negatives_dir, ambient_dirs, output_dir,
         "minimization_metric": None,
         "target_minimization": 0.5,
         "maximization_metric": "average_viable_recall",
-        "train_dir": str(Path(output_dir) / safe),
-        "summaries_dir": str(Path(output_dir) / safe / "summaries"),
+        # ONE DIRECTORY PER RUN. model_train_eval does os.makedirs(train_dir) and
+        # raises "model already exists in folder ..." if it is there at all
+        # (model_train_eval.py:111-120) - it will not train into an existing
+        # directory, not even an empty one holding only a config file.
+        #
+        # Tagging per run also keeps history, which the openWakeWord side did not:
+        # its rmtree deleted every archived model on each run until the corpus was
+        # nested under oww/.
+        "train_dir": str(Path(output_dir) / safe / (run_tag or "run")),
+        "summaries_dir": str(Path(output_dir) / safe / (run_tag or "run") / "summaries"),
         "features": features,
     }
 
