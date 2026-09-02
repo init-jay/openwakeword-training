@@ -5,12 +5,20 @@ openWakeWord's config from a template rather than shipping one: the paths, the
 per-set weights and the clip counts all move together, and a hand-edited YAML drifts
 from what the corpus actually contains. This mirrors create_config in train.py.
 
-THE KEY THING READING THE SOURCE CHANGED. A feature set can be `type: clips` as well
-as `type: mmap` (microwakeword/data.py:405-452). `Clips(input_directory, file_pattern)`
-reads a directory of audio files, so `corpus/` output feeds the trainer directly and
-spectrograms are generated on the fly. Only the pre-generated ambient negatives from
-Hugging Face arrive as RaggedMmap. The plan originally scoped a conversion step for
-our own clips; there is none to build.
+EVERYTHING IS `type: mmap`, INCLUDING OUR OWN CORPUS. A feature set can also be
+`type: clips`, which reads a directory of WAVs and generates spectrograms on the fly,
+and that looked like it removed the need for a conversion step. It does not:
+ClipsHandlerWrapperGenerator.get_mode_size returns 0 for every mode except
+"training" (data.py:357-362), so a clips set supplies no validation or testing data
+and the first validation step fails on whatever shape the ambient sets yield instead.
+
+A clips training set would also LEAK. It is constructed with
+spectrogram_generator(random=True), which draws from Clips.clips - every clip in the
+directory, ignoring the train/validation/test split - so training would sample the
+same clips that validation is scored on.
+
+So mww/features.py writes all three splits to RaggedMmap up front, and this config
+points at those. The ambient negatives from Hugging Face arrive in the same form.
 
 DERIVED KEYS ARE NOT WRITTEN HERE. `spectrogram_length`,
 `spectrogram_length_final_layer`, `training_input_shape` and `stride` are computed by
@@ -115,9 +123,9 @@ def build(wake_word, positives_dir, negatives_dir, ambient_dirs, output_dir,
           data_dir=".", training_steps=None, learning_rates=None,
           batch_size=DEFAULT_BATCH_SIZE, negative_class_weight=None, run_tag=None):
     safe = wake_word.replace(" ", "_").lower()
-    data = Path(data_dir)
-    impulse = [data / Path(p).name for p in IMPULSE_DIRS]
-    background = [data / Path(p).name for p in BACKGROUND_DIRS]
+    # Augmentation now happens in mww/features.py, when the spectrograms are
+    # written, so no augmentation settings appear in this config at all.
+    del data_dir
 
     features = [
         # Positives from mww/corpus.py: synthetic voices plus real recordings,
@@ -128,16 +136,14 @@ def build(wake_word, positives_dir, negatives_dir, ambient_dirs, output_dir,
         # globbing the directory once, so N copies become N augmented variants. mWW
         # augments on every read, so copies would only bias sampling - and
         # `sampling_weight` below is the honest knob for that. See corpus/real.py.
-        clips_feature_set(positives_dir, truth=True, sampling_weight=2.0,
-                          penalty_weight=1.0, impulse_dirs=impulse,
-                          background_dirs=background),
+        mmap_feature_set(positives_dir, truth=True, sampling_weight=2.0,
+                         penalty_weight=1.0, truncation_strategy="default"),
         # This repo's ADVERSARIAL negatives - "hey serious", "hey Sienna". ~100 clips
         # against ambient sets orders of magnitude larger, so they need a sampling
         # weight that keeps them visible. This is the per-set lever openWakeWord did
         # not have: there, max_negative_weight applied to the whole negative class.
-        clips_feature_set(negatives_dir, truth=False, sampling_weight=2.0,
-                          penalty_weight=1.0, impulse_dirs=impulse,
-                          background_dirs=background),
+        mmap_feature_set(negatives_dir, truth=False, sampling_weight=2.0,
+                         penalty_weight=1.0, truncation_strategy="default"),
     ]
     for d in ambient_dirs:
         features.append(mmap_feature_set(d, truth=False, sampling_weight=1.0,
@@ -196,16 +202,17 @@ def main():
     args = p.parse_args()
 
     safe = args.wake_word.replace(" ", "_").lower()
-    corpus = Path(args.corpus_root) / safe / "mww"
+    corpus = Path(args.corpus_root) / safe / "mww" / "features"
     positives = Path(args.positives) if args.positives else corpus / "positives"
     negatives = Path(args.negatives) if args.negatives else corpus / "negatives"
 
     for label, d in (("positives", positives), ("negatives", negatives)):
-        n = len(list(d.glob("*.wav"))) if d.is_dir() else 0
-        print(f"  {label:<10} {d}  ({n} wav)")
+        n = len(list(d.glob("*/*_mmap"))) if d.is_dir() else 0
+        print(f"  {label:<10} {d}  ({n} mmap sets)")
         if n == 0:
             print("           EMPTY OR MISSING. Build it first:")
-            print(f'             python -m mww.corpus --wake-word "{args.wake_word}"')
+            print(f'             python -m mww.corpus   --wake-word "{args.wake_word}"')
+            print(f'             python -m mww.features --wake-word "{args.wake_word}"')
 
     cfg = build(args.wake_word, positives, negatives, args.ambient,
                 args.output_dir, data_dir=args.data_dir,

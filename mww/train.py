@@ -150,7 +150,7 @@ def main():
         config_path = Path(args.config)
         cfg = yaml.safe_load(config_path.read_text())
     else:
-        corpus = Path(args.corpus_root) / safe / "mww"
+        corpus = Path(args.corpus_root) / safe / "mww" / "features"
         cfg = mww_config.build(
             args.wake_word, corpus / "positives", corpus / "negatives",
             args.ambient, args.output_dir, data_dir=args.data_dir,
