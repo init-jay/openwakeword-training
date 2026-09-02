@@ -130,7 +130,39 @@ if [ "$found" -eq 0 ]; then
 fi
 
 echo
-echo "Pass the deduplicated parents to mww/config.py --ambient, e.g."
-echo "  python -m mww.config --wake-word \"hey seeree\" \\"
-echo "      --ambient $AMBIENT_DIR/speech $AMBIENT_DIR/no_speech \\"
-echo "      --data-dir $DATA_DIR --out training_parameters.yaml"
+echo "=== which splits each set provides:"
+# THE SETS ARE NOT INTERCHANGEABLE, and which is which is not obvious from the
+# names. Only the *_eval archives carry validation_ambient/testing_ambient, and
+# those are what model selection runs on: the maximization metric is
+# average_viable_recall, computed from false accepts per hour on ambient audio.
+# Without them it reads 0.000 at every step, the best checkpoint never improves on
+# anything, and the exported model is whichever happened to be current - while
+# accuracy, recall and precision all still look excellent.
+have_eval=""
+for entry in "${SETS[@]}"; do
+    name="${entry%%:*}"
+    [ -d "$AMBIENT_DIR/$name" ] || continue
+    splits=""
+    for split in training validation testing validation_ambient testing_ambient; do
+        if [ -d "$AMBIENT_DIR/$name/$split" ]; then
+            splits="$splits $split"
+            case "$split" in *_ambient) have_eval=1 ;; esac
+        fi
+    done
+    printf "  %-20s%s\n" "$name" "${splits:- (none - check this set)}"
+done
+
+echo
+echo "Pass ALL of them to --ambient; they play different roles:"
+printf "  --ambient"
+for entry in "${SETS[@]}"; do
+    name="${entry%%:*}"
+    [ -d "$AMBIENT_DIR/$name" ] && printf " %s" "$AMBIENT_DIR/$name"
+done
+echo
+if [ -z "$have_eval" ]; then
+    echo
+    echo "WARNING: no set provides validation_ambient/testing_ambient. Model"
+    echo "         selection cannot work without them - average_viable_recall will"
+    echo "         be 0.000 at every step. The *_eval archives carry those splits."
+fi
