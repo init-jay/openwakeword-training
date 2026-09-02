@@ -50,16 +50,18 @@ import yaml
 # The failure lands AFTER training completes, during TFLite conversion, so a full run
 # is spent before it appears - and it leaves a 0-byte .tflite behind.
 #
-# The arithmetic: spectrogram_length grows by exactly one frame per `window_step_ms`
-# of clip duration, so each 20 ms step moves it by 1. At 1500 ms it is 179, and
-# 179 % 3 = 2. 1520 ms gives 180, which divides by the stride of 3.
+# The arithmetic is at the bottom of this file, reimplemented so it can be checked
+# before a run rather than discovered after one. The trap is that the frame step
+# includes the STRIDE - `window_step_samples = stride * 16000 * window_step_ms / 1000`
+# - so one frame is 60 ms here, not 20. Two attempts at this failed by moving the
+# clip duration 20 ms and changing nothing: 1500 and 1520 both give 179.
 #
-# CHANGING `--stride` OR THE MIXCONV KERNELS CHANGES THIS. `spectrogram_length` is
-# `spectrogram_length_final_layer + spectrogram_slices_dropped(flags)`, and the second
-# term depends on the kernel sizes and stride (mixednet.py:108-128). If either moves,
-# re-derive the clip duration from the input shape the model prints at startup rather
-# than assuming 1520 still works.
-CLIP_DURATION_MS = 1520
+# 1560 ms gives 180, which divides by the stride of 3.
+#
+# DO NOT HAND-PICK THIS AFTER CHANGING `--stride` OR THE MIXCONV KERNELS.
+# check_quantization_constraint() derives it from the model flags and names a working
+# value; mww/train.py calls it before launching.
+CLIP_DURATION_MS = 1560
 
 # 10 ms in the preprocessor, 20 ms as the model's window step. Upstream's default.
 WINDOW_STEP_MS = 20
@@ -249,3 +251,83 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ---------------------------------------------------------------------------
+# The quantization constraint, checkable before a run instead of after one.
+#
+# int8 calibration feeds the representative dataset in stride-sized slices and
+# asserts the spectrogram divides evenly (utils.py:321). It runs AFTER training
+# completes, so getting this wrong costs a full run and leaves a 0-byte .tflite.
+#
+# Two attempts got it wrong by reasoning from part of the formula. The whole of it
+# is model_train_eval.py:60-88, and the part that matters is that the frame step
+# includes the STRIDE:
+#
+#     window_step_samples = stride * 16000 * window_step_ms / 1000
+#
+# so one frame is stride x window_step_ms = 60 ms here, not 20. Changing the clip
+# duration by 20 ms moves nothing; it takes 60 ms to move the length by one.
+# ---------------------------------------------------------------------------
+
+PREPROCESSOR_SAMPLE_RATE = 16000
+PREPROCESSOR_WINDOW_SIZE_MS = 30
+
+
+def _parse_list(text):
+    """mixednet's flag format: '1,1,1,1' or '[5], [7,11], [9,15], [23]'."""
+    import ast
+    text = text.strip()
+    if "[" in text:
+        return list(ast.literal_eval(f"[{text}]"))
+    return [int(x) for x in text.split(",") if x.strip()]
+
+
+def mixednet_slices_dropped(flags: dict) -> int:
+    """Frames lost to valid padding - mixednet.py:108-128, reimplemented."""
+    dropped = 0
+    if int(flags["first_conv_filters"]) > 0:
+        dropped += int(flags["first_conv_kernel_size"]) - 1
+    stride = int(flags["stride"])
+    for repeat, ksize in zip(_parse_list(flags["repeat_in_block"]),
+                             _parse_list(flags["mixconv_kernel_sizes"])):
+        dropped += (repeat * (max(ksize) - 1)) * stride
+    return dropped
+
+
+def spectrogram_length(clip_duration_ms, window_step_ms, stride, slices_dropped):
+    """model_train_eval.py:66-88, reimplemented so it can be checked up front."""
+    desired = int(PREPROCESSOR_SAMPLE_RATE * clip_duration_ms / 1000)
+    window = int(PREPROCESSOR_SAMPLE_RATE * PREPROCESSOR_WINDOW_SIZE_MS / 1000)
+    step = int(stride * PREPROCESSOR_SAMPLE_RATE * window_step_ms / 1000)
+    remainder = desired - window
+    final_layer = 0 if remainder < 0 else 1 + int(remainder / step)
+    return final_layer + slices_dropped
+
+
+def check_quantization_constraint(flags: dict, clip_duration_ms=None,
+                                  window_step_ms=None):
+    """(ok, length, message). Suggests a clip duration when it does not divide."""
+    clip_duration_ms = clip_duration_ms or CLIP_DURATION_MS
+    window_step_ms = window_step_ms or WINDOW_STEP_MS
+    stride = int(flags["stride"])
+    dropped = mixednet_slices_dropped(flags)
+    length = spectrogram_length(clip_duration_ms, window_step_ms, stride, dropped)
+    if length % stride == 0:
+        return True, length, f"spectrogram_length {length}, divisible by stride {stride}"
+
+    frame_ms = stride * window_step_ms
+    for delta in range(1, 40):
+        for candidate in (clip_duration_ms + delta * frame_ms,
+                          clip_duration_ms - delta * frame_ms):
+            if candidate <= 0:
+                continue
+            if spectrogram_length(candidate, window_step_ms, stride,
+                                  dropped) % stride == 0:
+                return False, length, (
+                    f"spectrogram_length {length} is not divisible by stride "
+                    f"{stride} - int8 calibration will assert AFTER training "
+                    f"completes. Try CLIP_DURATION_MS = {candidate} "
+                    f"(one frame is stride x window_step_ms = {frame_ms} ms).")
+    return False, length, (f"spectrogram_length {length} is not divisible by stride "
+                           f"{stride}, and no nearby clip duration fixes it")

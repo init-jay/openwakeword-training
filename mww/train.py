@@ -202,6 +202,18 @@ def main():
             print(f"  - {problem}")
         sys.exit(1)
 
+    # Check the int8 calibration constraint NOW. It is asserted after training
+    # completes, so getting it wrong costs a full run and leaves a 0-byte model.
+    flags = dict(zip([f.lstrip("-") for f in args.model_flags[::2]],
+                     args.model_flags[1::2]))
+    if args.model == "mixednet" and "stride" in flags:
+        ok, length, message = mww_config.check_quantization_constraint(
+            flags, cfg["clip_duration_ms"], cfg["window_step_ms"])
+        print(f"  {message}")
+        if not ok:
+            sys.exit("\nREFUSING TO TRAIN: the run would complete and then fail "
+                     "during TFLite conversion.")
+
     train_dir = Path(cfg["train_dir"])
     if train_dir.exists():
         if args.force:
