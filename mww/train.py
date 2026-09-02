@@ -36,6 +36,30 @@ from mww import config as mww_config  # noqa: E402
 SHIPPED = ("tflite_stream_state_internal_quant", "stream_state_internal_quant.tflite")
 ROC_FILE = "tflite_streaming_roc.txt"
 
+# THE ARCHITECTURE IS AN ARGPARSE SUBCOMMAND, NOT A CONFIG KEY. model_train_eval
+# registers `inception` and `mixednet` as subparsers and raises
+# "Unknown model type: None" if neither is given - which is what a YAML-only
+# invocation gets, because none of these values live in the YAML at all.
+#
+# `config["stride"]` and the derived spectrogram lengths are computed FROM these
+# flags (model_train_eval.py:60-93), so the architecture and the feature geometry
+# are set in the same place, and changing one silently changes the other.
+#
+# Values below are upstream's notebook defaults, kept verbatim as a starting point -
+# they differ from mixednet.py's own argparse defaults, which are narrower
+# (pointwise_filters "48, 48, 48, 48", kernels "[5], [9], [13], [21]", stride 1).
+# Change one at a time and record it, tuning.md style.
+MODEL = "mixednet"
+MODEL_FLAGS = [
+    "--pointwise_filters", "64,64,64,64",
+    "--repeat_in_block", "1,1,1,1",
+    "--mixconv_kernel_sizes", "[5], [7,11], [9,15], [23]",
+    "--residual_connection", "0,0,0,0,0",
+    "--first_conv_filters", "32",
+    "--first_conv_kernel_size", "5",
+    "--stride", "3",
+]
+
 
 def checksum(path: Path):
     return hashlib.md5(path.read_bytes()).hexdigest() if path.is_file() else None
@@ -54,9 +78,16 @@ def main():
     p.add_argument("--batch-size", type=int, default=mww_config.DEFAULT_BATCH_SIZE)
     p.add_argument("--config", default=None,
                    help="use an existing YAML instead of generating one")
+    p.add_argument("--model", default=MODEL, choices=("mixednet", "inception"),
+                   help="architecture subcommand (default: %(default)s)")
+    p.add_argument("--model-flags", nargs=argparse.REMAINDER, default=None,
+                   help="override the architecture flags entirely; everything after "
+                        "this is passed through verbatim")
     p.add_argument("passthrough", nargs="*", default=[],
                    help="extra args for model_train_eval, after --")
     args = p.parse_args()
+    if args.model_flags is None:
+        args.model_flags = MODEL_FLAGS if args.model == "mixednet" else []
 
     safe = args.wake_word.replace(" ", "_").lower()
 
@@ -100,10 +131,14 @@ def main():
     model_path = train_dir / SHIPPED[0] / SHIPPED[1]
     before = checksum(model_path)
 
-    cmd = [sys.executable, "-m", "microwakeword.model_train_eval",
-           "--training_config", str(config_path),
-           "--train", "1",
-           "--test_tflite_streaming_quantized", "1"] + list(args.passthrough)
+    # The subcommand and its flags go LAST - argparse subparsers consume everything
+    # after the subcommand name, so any top-level flag placed after `mixednet` would
+    # be swallowed and then rejected as an unknown argument.
+    cmd = ([sys.executable, "-m", "microwakeword.model_train_eval",
+            "--training_config", str(config_path),
+            "--train", "1",
+            "--test_tflite_streaming_quantized", "1"]
+           + list(args.passthrough) + [args.model] + args.model_flags)
     print("\n" + " ".join(cmd) + "\n")
     result = subprocess.run(cmd)
 
