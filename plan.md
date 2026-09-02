@@ -4,9 +4,9 @@ Target: [OHF-Voice/micro-wake-word](https://github.com/OHF-Voice/micro-wake-word
 wake-word runtime ESPHome uses on ESP32. Output is an int8-quantised streaming
 `.tflite` plus a JSON manifest, not an ONNX.
 
-This is a plan, not a decision that has been taken. Everything below marked
-**(verified)** was checked against this repo or upstream on 2026-09-01; everything
-marked **(assumed)** has not been, and is where the estimate will move.
+Phases 1 and 2 are BUILT and running; phase 3 is not started. Sections written before
+they were built are kept where the reasoning still holds and marked where it did not -
+several confident claims here were wrong, and which ones is the useful part.
 
 ## The thing to get right first
 
@@ -61,24 +61,32 @@ model → 96-dim embeddings over a 2000 ms window; microWakeWord is 40 features 
 
 ## Layout
 
-Keep one repo. Two trainers behind a shared corpus layer:
+One repo, two trainers behind a shared corpus layer. As built:
 
-    corpus/                  extracted from train.py - engine-agnostic
-      generate.py            Kokoro + Piper -> WAV dirs
-      augment.py             trim, child-range, run-on
-      negatives.py           from generate_negatives.py
-    oww/                     existing pipeline, unchanged behaviour
-      train.py
+    corpus/                  engine-agnostic, extracted from train.py
+      augment.py             trimming, child-range copies
+      negatives.py           the negative wordlist
+      positives.py           phrase texts + speed grid (tuned; shared so they cannot drift)
+      piper.py               Wyoming generation, voice audit lists, F0 sex map
+      real.py                real recordings into a corpus
+    train.py                 openWakeWord trainer (unchanged behaviour)
     mww/
-      train.py               config + SpectrogramGeneration + MixedNet
-      manifest.py            emit the ESPHome JSON
-    eval/
-      backends.py            the shared model interface (phase 3)
-      eval_model.py  compare_models.py  check_alignment.py
+      corpus.py              WAVs -> my_custom_model/<ww>/mww/{positives,negatives}
+      features.py            -> .../mww/features/<set>/<split>/*_mmap
+      config.py              -> the training YAML
+      train.py               -> quantized streaming tflite
+      manifest.py            NOT WRITTEN - the ESPHome JSON
+    eval/                    NOT WRITTEN - phase 3
 
-`1_datagen/`, `2_train/`, `3_eval/` currently exist and are empty (verified). Either
-adopt that naming or delete them - three empty directories are a false signal about
-where things live.
+Corpora are siblings under `my_custom_model/<wake_word>/{oww,mww}/`, so neither
+trainer reaches into the other's. That nesting also fixed a bug: `setup_training_dirs`
+rmtree'd `my_custom_model/<wake_word>/`, which is where `run-training.sh` archives the
+commit-tagged models - every run deleted the archive of every previous run.
+`patches/configurable-corpus-dir.py` makes openWakeWord read the corpus location from
+its config, since upstream derives it from the same value that names the model.
+
+`1_datagen/`, `2_train/`, `3_eval/` still exist and are still empty - three
+directories claiming a structure nothing uses.
 
 **Do not refactor `train.py` before phase 2.** Its behaviour is the baseline that
 sixteen runs of `tuning.md` are calibrated against; a refactor that quietly changes
@@ -86,23 +94,23 @@ corpus generation invalidates the notebook. Extract only when there is a second
 consumer to prove the extraction against, and re-run one config to confirm the numbers
 land in the same band.
 
-## Phase 0 - one throwaway model (half a day)
+## Phase 0 - one throwaway model — SKIPPED
 
-Run mWW's `basic_training_notebook.ipynb` unmodified, with their Piper samples and
-their pre-generated negative spectrograms, and get *any* `.tflite` onto a device.
+Never run. Phase 2 was built directly instead, and its questions got answered the
+expensive way, mid-build:
 
-The point is not the model, which will be bad. The point is that the notebook's data
-layout constrains every later design decision, and reading it is not the same as
-running it. Specifically, find out:
+| question | answer |
+|---|---|
+| does `pymicro-features` build in the image? | yes on linux/amd64, py3.11 - no fork needed |
+| RaggedMmap layout; can custom WAV dirs be fed in? | `<dir>/<split>/**/*_mmap`; yes via `Clips`, but **training only** - see phase 2 |
+| how large are the negative sets? | 5.7 GB across four archives |
+| does ESPHome accept a hand-written manifest? | still unknown - the emitter is unwritten |
 
-- whether `pymicro-features` builds in the trainer image, or needs the macOS fork
-  (assumed: fine on Linux, untested)
-- the exact `RaggedMmap` on-disk layout and whether custom WAV directories can be fed
-  to `SpectrogramGeneration` without going through their Piper generator (assumed: yes)
-- how large the negative spectrogram sets are on disk
-- whether ESPHome accepts a hand-written manifest
-
-Do not build anything reusable in this phase.
+**The skip cost real time.** Six distinct failures surfaced during phase 2 that a
+half-day throwaway run would have surfaced first, and one of them - `type: clips`
+being training-only - had already been written into this plan as a finding that
+"deletes most of what this phase was scoped to build". Reading the source is not the
+same as running it, which is what this phase existed to say.
 
 ## Phase 1 - shared corpus layer (2-3 days)
 
@@ -121,9 +129,10 @@ measured the largest gain since run 10 - jay run-on 75% -> 95% at 8/32, ryan pla
 83% -> 100%, adversarial false accepts down. The shared corpus layer is therefore
 proven useful to the trainer that already existed, independent of microWakeWord.
 
-**Caveat 1: "both trainers consume WAV directories" is only half-tested.** There is
-still only one trainer. `corpus/` is proven against openWakeWord; whether its shape
-fits microWakeWord's SpectrogramGeneration is unverified, because phase 0 never ran.
+**Caveat 1 (RESOLVED in phase 2).** `corpus/` output does feed microWakeWord: its
+`Clips(input_directory, file_pattern)` reads the same directories of 16 kHz WAVs. The
+qualification is that clips alone serve training only, so `mww/features.py` converts
+them to RaggedMmap for validation and testing.
 
 **Caveat 2: this phase ran BEFORE phase 0 and phase 3's interface, inverting the
 order this plan argued for.** The reasoning for that order was that mWW's data layout
@@ -186,78 +195,126 @@ upstream does not do it.
 Gate: re-run one openWakeWord config through the extracted layer and confirm it lands
 inside the noise band on jay/ryan/jen. If it does not, the extraction changed something.
 
-## Phase 2 - mWW training backend (3-5 days)
+## Phase 2 - mWW training backend
 
-**The design below was written from the README and is WRONG in one important way.
-Corrected after reading the source (2026-09-02, OHF-Voice/micro-wake-word@main).**
+**Status: the pipeline runs end to end.** Corpus -> features -> config -> training ->
+quantized streaming tflite. Written from the source rather than the README, and twice
+corrected by running it - both corrections are below, because the wrong version was
+confidently written down first.
 
-### What reading the source changed
+### The pipeline, as built
 
-**1. There is no mmap step for our own corpus.** A feature set in the training YAML
-takes a `type`, and it can be `clips` as well as `mmap` (`data.py:405-452`):
+    mww/corpus.py    WAVs      my_custom_model/<ww>/mww/{positives,negatives}
+    mww/features.py  RaggedMmap  .../mww/features/{positives,negatives}/<split>/*_mmap
+    mww/config.py    YAML      mww_models/<ww>/<tag>.yaml
+    mww/train.py     model     mww_models/<ww>/<tag>/tflite_stream_state_internal_quant/
 
-    type: clips
-    clips_settings:                   -> Clips(**)
-    augmentation_settings:            -> Augmentation(**)
-    spectrogram_generation_settings:  -> SpectrogramGeneration(**)
+`Dockerfile.mww` + an `mww` compose service; `setup-mww-data.sh` for the ambient sets.
 
-`Clips(input_directory, file_pattern, ...)` reads **a directory of audio files with a
-glob**. So `corpus/` output feeds microWakeWord directly and spectrograms are generated
-on the fly. The RaggedMmap layout - `<dir>/{training,validation,testing,
-testing_ambient,validation_ambient}/**/*_mmap/` - is still how the pre-generated
-NEGATIVE sets from Hugging Face arrive, so both types appear in one config, but nothing
-we generate needs converting. That deletes most of what this phase was scoped to build.
+### Correction 1: `type: clips` is TRAINING-ONLY, so the mmap step is required
 
-**2. The augmentation corpora are the ones already downloaded.** `Augmentation` takes
-`impulse_paths` and `background_paths`, which is `data/mit_rirs`, `data/audioset_16k`
-and `data/fma` from `setup-data.sh`. Its default probabilities are near-identical to
-openWakeWord's (AddBackgroundNoise 0.75, RIR 0.5).
+The first reading of the source found that a feature set can be `type: clips`, which
+reads a directory of WAVs and generates spectrograms on the fly, and concluded that
+"there is no mmap step to build - that deletes most of what this phase was scoped to
+build." **That was wrong**, and it was wrong because the check stopped at "does this
+type exist" without asking which MODES it serves:
 
-**3. The derived config values are computed by the trainer, not by us.**
-`spectrogram_length`, `spectrogram_length_final_layer`, `training_input_shape` and
-`stride` are all filled in by `model_train_eval.py:60-93` from `clip_duration_ms`,
-`window_step_ms` and the model flags. The generator only writes authored keys.
+    # data.py, ClipsHandlerWrapperGenerator
+    def get_mode_size(self, mode):
+        if mode == "training":
+            return len(self.spectrogram_generation.clips.clips)
+        else:
+            return 0
 
-**4. mWW CANNOT share the trainer image.** Its `setup.py` requires `numpy>=2.0`;
-`requirements.txt` here pins `numpy<2` for openWakeWord and torch. Also
-`tensorflow>=2.18`, `pymicro-features`, `mmap_ninja`, `webrtcvad-wheels`,
-`ai-edge-litert`. So a separate `Dockerfile.mww`, which is also cleaner - it keeps a
-numpy-2 TensorFlow stack away from the image whose behaviour seventeen runs depend on.
+Validation and testing get nothing from a clips set. The symptom is a shape error at
+the first validation step, from whatever the ambient sets yield instead.
 
-### Revised scope
+A clips training set would also LEAK: it is built with
+`spectrogram_generator(random=True)`, which draws from `Clips.clips` - every clip in
+the directory, ignoring the train/validation/test split - so training would sample the
+clips validation is scored on. That would not have crashed. It would have inflated
+validation accuracy quietly, which is worse.
 
-- `Dockerfile.mww` + an `mww` compose service. Base on `tensorflow/tensorflow:*-gpu`,
-  which is the stack already proven on this training server.
-- `mww/config.py` - emit the training YAML: `type: clips` feature sets pointing at
-  `corpus/` output, `type: mmap` sets for the downloaded ambient negatives.
-- A fetch step for the Hugging Face negative sets (`dinner_party`, `no_speech`,
-  `speech` and their `_eval` variants) - the one genuinely large download.
-- `mww/manifest.py` - the ESPHome JSON, carrying `probability_cutoff` and
-  `sliding_window_size`.
+So `mww/features.py` writes all three splits to RaggedMmap up front, with
+`slide_frames` 10/10/1 per upstream, and every feature set in the config is
+`type: mmap`. Augmentation happens there, once, rather than in the config.
 
-Start from the notebook's config verbatim - `MixedNet`, pointwise filters 64x4,
-mixconv kernels `[5],[7,11],[9,15],[23]`, 10000 steps, batch 128, negative class
-weight 20 - and change one thing at a time, `tuning.md` style.
+### Correction 2: only the `_eval` archives can drive model selection
 
-**The negatives need thought, not just concatenation.** mWW trains against large
-pre-generated negative spectrogram sets (`dinner_party`, `speech`, `no_speech`). This
-repo's adversarial negatives are ~100 clips. Dropped into a set that size they are a
-rounding error, and `extend` false accepts - unsolved here at 6-8/32 across every run
-since run 6 - is exactly what they exist to fix. The `sampling_weight` and
-`penalty_weight` per feature set are the levers, and they are per-set, which is a
-better instrument than openWakeWord's single `max_negative_weight`.
+The four Hugging Face sets are not interchangeable, and the names do not say so:
 
-Start from the notebook's config verbatim - `MixedNet`, pointwise filters 64x4,
-mixconv kernels `[5],[7,11],[9,15],[23]`, 10000 steps, batch 128, negative class
-weight 20 - and change one thing at a time, `tuning.md` style.
+| set | splits | role |
+|---|---|---|
+| `speech`, `no_speech`, `dinner_party` | `training` | ambient negatives to train on |
+| `dinner_party_eval` | `validation_ambient`, `testing_ambient` | **model selection** |
 
-**The negatives need thought, not just concatenation.** mWW trains against large
-pre-generated negative spectrogram sets (`dinner_party`, `speech`, `no_speech`). This
-repo's adversarial negatives are ~100 clips. Dropped into a set that size they are a
-rounding error, and `extend` false accepts - unsolved here at 6-8/32 across every run
-since run 6 - is exactly what they exist to fix. Expect to need mWW's equivalent of
-`max_negative_weight`. This is the same lesson `--real-copies 10` taught, and it was
-the single biggest lever found here.
+`maximization_metric` is `average_viable_recall`, computed from false accepts per hour
+on ambient audio. Without an `*_ambient` split it reads **0.000 at every step**, the
+best checkpoint never improves on anything, and the exported model is whichever
+happened to be current - while accuracy, recall, precision and AUC all still look
+excellent. Measured: 96.4% accuracy, 97.6% recall, AUC 0.978, and a selection metric
+of exactly zero.
+
+Pass all four to `--ambient`. `setup-mww-data.sh` now prints which splits each set
+provides and warns when none supplies the evaluation ones.
+
+### What held up from the first reading
+
+- **The augmentation corpora are the ones already downloaded** - `Augmentation` takes
+  `impulse_paths` and `background_paths`, which is `data/mit_rirs`,
+  `data/audioset_16k`, `data/fma` from `setup-data.sh`. Nothing to re-fetch.
+- **Derived config values are computed by the trainer** - `spectrogram_length`,
+  `training_input_shape`, `stride` come from `model_train_eval.py:60-93`. The
+  generator writes only authored keys.
+- **mWW cannot share the trainer image** - it requires `numpy>=2.0` against this
+  repo's `numpy<2`. A hard incompatibility, and a good separation anyway.
+
+### What running it actually cost, and why
+
+Six failures, none of which the README would have predicted, and all but one silent
+or misleading rather than a clean error:
+
+1. `Unknown model type: None` - the architecture is an argparse SUBCOMMAND
+   (`mixednet`), not a config key, and its flags carry the notebook's settings.
+2. `all input lists have to be the same length` - upstream's own argparse defaults
+   are inconsistent (`residual_connection` has 5 entries against 4 filters).
+3. `ImportError: ... install 'torchcodec'` - mWW's `setup.py` leaves `datasets`
+   unpinned and 4.x moved audio decoding to torchcodec. Pinned to `datasets[audio]<4`.
+4. `TBNotInstalledError` - `tf.summary.scalar` needs tensorboard, which neither the
+   TF image nor mWW's setup.py provides. Training dies after exactly one eval
+   interval.
+5. `model already exists in folder` - `os.makedirs(train_dir)` refuses any existing
+   directory, including one holding only a config file. Runs are now tagged per
+   commit, config written as a sibling.
+6. The two corrections above.
+
+Each is now a build-time assert or a refusal in `mww/train.py`, because every one of
+them either produced a confusing traceback deep into a run or, worse, did not.
+
+### Still to build
+
+- **`mww/manifest.py`** - the ESPHome JSON. `probability_cutoff` and
+  `sliding_window_size` should come from `tflite_streaming_roc.txt`, which the
+  training run writes beside the model: false accepts per hour against cutoff. That
+  is the same job as the threshold sweep on the openWakeWord side, and picking a
+  default instead would repeat the mistake `tuning.md` opens by warning about.
+- **Kokoro in the mWW corpus.** It is Piper-only today because the Kokoro client
+  still lives in `train.py` rather than `corpus/`. Run 17 measured two engines
+  beating one by the largest margin since run 10, so this is a known cost.
+- **Run-on positives.** Their cut point needs word timestamps Wyoming does not
+  expose. On the openWakeWord side run-ons took held-out run-on detection from 5% to
+  the 80s - the most valuable gap here.
+- **The shared corpus pool** (deferred until the first mWW model trained, which it
+  now has). Render once, assemble per trainer by hardlink; the differences between
+  the two corpora are all assembly, not generation.
+
+### The negatives still need thought, not concatenation
+
+mWW trains against large pre-generated ambient sets. This repo's adversarial
+negatives are ~1100 clips - a rounding error beside them unless weighted, and
+`extend` false accepts are exactly what they exist to fix (unsolved at 6-8/32 since
+run 6). `sampling_weight` and `penalty_weight` are per feature set, which is a better
+instrument than openWakeWord's single `max_negative_weight`. Untuned so far.
 
 ## Phase 3 - evaluation (the expensive part, 1-2 weeks)
 
@@ -333,11 +390,24 @@ and carry over untouched.
 
 ## Order of work
 
-Phase 0 → phase 3's `backends.py` interface → phase 1 → phase 2.
+**Planned:** phase 0 → phase 3's `backends.py` interface → phase 1 → phase 2.
 
-Deliberately not sequential: **define the eval interface before building the trainer.**
-The pattern from sixteen runs is that models are cheap and trustworthy measurement is
-not, and eight runs here were judged on contaminated numbers before anyone noticed.
-Building the trainer first means the first mWW model arrives with no way to tell
-whether it is any good - and the temptation will be to judge it at a fixed threshold,
-which is the mistake `tuning.md` opens by warning against.
+**Actual:** phase 1 → phase 2, with phase 0 skipped and phase 3 not started.
+
+The argument for the planned order was: **define the eval interface before building
+the trainer**, because models are cheap and trustworthy measurement is not, and eight
+runs here were judged on contaminated numbers before anyone noticed. Building the
+trainer first means the first mWW model arrives with no way to tell whether it is any
+good - and the temptation is to judge it at a fixed threshold, which is the mistake
+`tuning.md` opens by warning about.
+
+That is now the situation. A mWW model trains, and nothing can score it:
+`compare_models.py`, `eval_model.py` and `check_model_alignment.py` all load through
+`openwakeword.model.Model`, which cannot read a streaming tflite with internal state.
+The first model came out with `average_viable_recall = 0.000` at every step and
+looked excellent by accuracy, recall, precision and AUC - which is exactly the failure
+the ordering was meant to prevent.
+
+Skipping phase 0 cost six avoidable failures (phase 2). Skipping phase 3's interface
+has cost nothing yet only because no mWW model has needed judging. **Phase 3 is the
+next thing, before any mWW tuning run.**
