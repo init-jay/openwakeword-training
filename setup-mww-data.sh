@@ -58,7 +58,20 @@ for entry in "${SETS[@]}"; do
     target="$AMBIENT_DIR/$name"
 
     if [ -d "$target" ]; then
-        echo "=== $name already present, skipping"
+        # REPAIR the double-nesting left by earlier versions of this script, which
+        # unzipped straight into $target and so kept the archive's wrapper folder.
+        # Cheap: a rename within one filesystem, not a copy of several GB. Done here
+        # rather than as a one-off command because the files are root-owned by the
+        # container that made them, and because re-running this script is the
+        # obvious thing to reach for.
+        if [ -d "$target/$name" ]; then
+            echo "=== $name is double-nested ($target/$name) - flattening"
+            mv "$target/$name" "$target.flat"
+            rmdir "$target" 2>/dev/null || rm -rf "$target"
+            mv "$target.flat" "$target"
+        else
+            echo "=== $name already present, skipping"
+        fi
         continue
     fi
 
