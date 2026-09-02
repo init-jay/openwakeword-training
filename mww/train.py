@@ -54,11 +54,45 @@ MODEL_FLAGS = [
     "--pointwise_filters", "64,64,64,64",
     "--repeat_in_block", "1,1,1,1",
     "--mixconv_kernel_sizes", "[5], [7,11], [9,15], [23]",
-    "--residual_connection", "0,0,0,0,0",
+    # FOUR entries, matching the other three lists. mixednet.model asserts all
+    # four are the same length (mixednet.py:298-305), and upstream's own
+    # argparse default is "0,0,0,0,0" against four pointwise filters - so the
+    # bare defaults fail that assert too.
+    "--residual_connection", "0,0,0,0",
     "--first_conv_filters", "32",
     "--first_conv_kernel_size", "5",
     "--stride", "3",
 ]
+
+
+# data.py:170-190 globs <features_dir>/<split>/**/*_mmap/ for exactly these splits.
+# Anything outside them is invisible to the trainer, however many mmap directories it
+# contains - which is why a laxer "**/*_mmap" check passes a set that then loads zero
+# spectrograms.
+SPLITS = ("training", "validation", "testing", "testing_ambient", "validation_ambient")
+
+
+def check_mmap_set(d: Path):
+    """Problems with one mmap feature set, phrased so the fix is obvious."""
+    if not d.is_dir():
+        return [f"{d} does not exist"]
+    if any((d / split).glob("**/*_mmap") for split in SPLITS
+           if (d / split).is_dir()):
+        return []
+
+    # Nothing under the split names. The usual cause is an extra directory level
+    # from unzipping an archive that already had a top-level folder, so look for
+    # somewhere below that IS shaped correctly and name it.
+    for candidate in sorted(p for p in d.glob("**/") if p != d):
+        if any((candidate / split).is_dir() and
+               any((candidate / split).glob("**/*_mmap")) for split in SPLITS):
+            return [f"{d} has no <split>/**/*_mmap - but {candidate} does. "
+                    f"Point --ambient at that instead."]
+
+    found = len(list(d.glob("**/*_mmap")))
+    return [f"{d} has no {'/'.join(SPLITS[:3])}/... subdirectories containing "
+            f"*_mmap ({found} *_mmap dirs elsewhere under it, which the trainer "
+            f"cannot see)"]
 
 
 def checksum(path: Path):
@@ -115,9 +149,7 @@ def main():
             if n == 0:
                 problems.append(f"no clips in {d}")
         elif fs["type"] == "mmap":
-            d = Path(fs["features_dir"])
-            if not any(d.glob("**/*_mmap")):
-                problems.append(f"no *_mmap directories under {d}")
+            problems.extend(check_mmap_set(Path(fs["features_dir"])))
     if not any(fs["type"] == "mmap" for fs in cfg["features"]):
         problems.append("no ambient negative sets - pass --ambient. Without them the "
                         "model has never seen ordinary background and will fire on it")

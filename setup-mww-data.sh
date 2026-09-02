@@ -66,9 +66,34 @@ for entry in "${SETS[@]}"; do
     curl -L --fail -o "$AMBIENT_DIR/$name.zip" "$BASE_URL/$name.zip"
 
     echo "=== unpacking $name"
-    mkdir -p "$target"
-    unzip -q "$AMBIENT_DIR/$name.zip" -d "$target"
+    # STRIP THE WRAPPER DIRECTORY. These archives contain a single top-level folder
+    # named after the set, so unzipping straight into $target yields
+    # <target>/<name>/training/..., one level deeper than microWakeWord looks.
+    # data.py globs <features_dir>/<split>/**/*_mmap and merely WARNS when it finds
+    # nothing, so the mistake shows up as a model trained without ambient negatives
+    # rather than as an error.
+    tmp="$AMBIENT_DIR/.unpack_$name"
+    rm -rf "$tmp"; mkdir -p "$tmp"
+    unzip -q "$AMBIENT_DIR/$name.zip" -d "$tmp"
+
+    entries="$(find "$tmp" -mindepth 1 -maxdepth 1)"
+    if [ "$(printf '%s\n' "$entries" | wc -l)" -eq 1 ] && [ -d "$entries" ]; then
+        mv "$entries" "$target"
+    else
+        mkdir -p "$target"
+        find "$tmp" -mindepth 1 -maxdepth 1 -exec mv {} "$target"/ \;
+    fi
+    rm -rf "$tmp"
     rm -f "$AMBIENT_DIR/$name.zip"
+
+    # Verify what landed is what the trainer will actually look for, rather than
+    # assuming the strip was right for this archive.
+    if ! find "$target" -mindepth 2 -maxdepth 3 -type d -name "*_mmap" \
+            -path "*/training/*" -o -path "*/testing/*" -name "*_mmap" \
+            | grep -q .; then
+        echo "  WARNING: $target has no <split>/*_mmap after unpacking - check it"
+        find "$target" -maxdepth 2 -type d | head -5
+    fi
 done
 
 echo
