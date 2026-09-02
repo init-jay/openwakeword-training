@@ -105,6 +105,44 @@ MISPRONOUNCING_PIPER_VOICES: dict[str, list[str]] = {
     ],
 }
 
+# Voices excluded because they were NEVER AUDITED, not because they are wrong.
+#
+# Kept separate from MISPRONOUNCING_PIPER_VOICES deliberately. Everything in that
+# list was measured and failed; everything here is simply unknown, and merging the
+# two would destroy the only record of which is which - so a later reader would have
+# no way to tell that these are cheap to reclaim.
+#
+# HOW THEY GOT HERE. The 2026-09-02 audit ran against one Piper instance and covered
+# 96 voices. Corpus generation later ran against the compose `piper` service, which
+# exposes 106. The extra ten arrived unaudited and unmapped, and contributed 600 of
+# 5520 synthetic positives - 10.9% of the Piper corpus, from voices whose
+# pronunciation had never been checked. The Kokoro equivalent was ~14% and went
+# unnoticed for eleven runs, so this is the same failure caught earlier.
+#
+# THE REAL LESSON IS THE MISMATCH: audit and generation must talk to the SAME Piper
+# service. An audit of a different instance is only accidentally relevant.
+#
+# TO RECLAIM THEM: audit these ten against the instance that generates the corpus,
+# then move them into MISPRONOUNCING_PIPER_VOICES or delete them from here, and add
+# their F0 to PIPER_VOICE_SEX. Note cori and ljspeech appear at two qualities each,
+# so this is eight distinct voices, and quality variants share a phonemisation but
+# not an acoustic model - l2arctic ranged 0-100% across speakers on identical
+# phonemes, so do not assume -high and -medium agree.
+UNAUDITED_PIPER_VOICES: dict[str, list[str]] = {
+    "hey_seeree": [
+        "en_GB-cori-high",
+        "en_GB-cori-medium",
+        "en_US-bryce-medium",
+        "en_US-john-medium",
+        "en_US-kristin-medium",
+        "en_US-ljspeech-high",
+        "en_US-ljspeech-medium",
+        "en_US-norman-medium",
+        "en_US-reza_ibrahim-medium",
+        "en_US-sam-medium",
+    ],
+}
+
 # Voice sex, for the child-range lever (corpus/augment.py). Keys are the voice name,
 # or "voice:speaker" for a multi-speaker model.
 #
@@ -451,8 +489,10 @@ def select_piper_voices(host, port, wake_word: str, languages=("en_US", "en_GB")
         print("         Start it with `docker compose up -d piper`.")
         sys.exit(1)
 
-    excluded = set(MISPRONOUNCING_PIPER_VOICES.get(safe_name, []))
-    if not excluded:
+    bad = set(MISPRONOUNCING_PIPER_VOICES.get(safe_name, []))
+    unaudited = set(UNAUDITED_PIPER_VOICES.get(safe_name, []))
+    excluded = bad | unaudited
+    if not bad:
         print(f"  WARNING: no MISPRONOUNCING_PIPER_VOICES entry for '{safe_name}'.")
         print("           Nothing has been excluded, so any voice whose espeak-ng")
         print("           g2p guesses the wake word wrong is contributing")
@@ -463,13 +503,29 @@ def select_piper_voices(host, port, wake_word: str, languages=("en_US", "en_GB")
     # Match both forms. The audit scores SPEAKERS - en_US-l2arctic-medium ran from
     # :ASI at 0% to :PNV at 100% on identical phonemes - so most entries are
     # "voice:speaker". A bare voice name still excludes the whole model.
-    kept = [(v, s) for (v, s) in found
-            if v not in excluded and f"{v}:{s}" not in excluded]
-    unknown = sum(1 for v, s in kept if voice_sex(v, s) == "u")
+    def is_excluded(v, s):
+        return v in excluded or f"{v}:{s}" in excluded
+
+    kept = [(v, s) for (v, s) in found if not is_excluded(v, s)]
+    n_bad = sum(1 for v, s in found if v in bad or f"{v}:{s}" in bad)
+    n_unaudited = sum(1 for v, s in found
+                      if v in unaudited or f"{v}:{s}" in unaudited)
+
     print(f"  Piper voices: {len(kept)} of {len(found)} "
-          f"({len(found) - len(kept)} excluded as mispronouncing)")
+          f"({n_bad} mispronouncing, {n_unaudited} unaudited)")
+
+    # A voice the service offers that appears in NEITHER list has never been checked
+    # and is not being excluded - which is the exact hole the ten unaudited voices
+    # fell through. Say so loudly rather than letting it show up later as a
+    # child-range coverage number.
+    unknown = sum(1 for v, s in kept if voice_sex(v, s) == "u")
     if unknown:
-        print(f"  {unknown} of {len(kept)} have no sex in PIPER_VOICE_SEX and will")
-        print(f"  get NO child-range copies - the run-13 lever covers "
-              f"{100 * (len(kept) - unknown) // max(1, len(kept))}% of the Piper set.")
+        names = sorted({v if s is None else f"{v}:{s}"
+                        for v, s in kept if voice_sex(v, s) == "u"})
+        print(f"  WARNING: {unknown} kept voice(s) are in no list and have no F0 -")
+        print("           unaudited AND unmapped, so they contribute possibly")
+        print("           mislabelled positives and get no child-range copy:")
+        print(f"           {', '.join(names[:8])}{' ...' if len(names) > 8 else ''}")
+        print("           Audit them against THIS Piper instance, or add them to")
+        print("           UNAUDITED_PIPER_VOICES in corpus/piper.py.")
     return kept
