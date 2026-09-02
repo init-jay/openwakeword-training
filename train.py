@@ -692,6 +692,10 @@ def create_config(wake_word: str, n_samples: int, training_steps: int,
     config["target_recall"] = 0.5
     config["target_false_positives_per_hour"] = 0.1
     config["output_dir"] = "./my_custom_model"
+    # The corpus lives one level deeper than upstream assumes, so the
+    # microWakeWord corpus can sit beside it - see
+    # patches/configurable-corpus-dir.py, which makes this key exist at all.
+    config["corpus_dir"] = f"./my_custom_model/{safe_name}/oww"
 
     # End of a linear ramp: the negative-class loss weight grows from 1 to this
     # over training (openwakeword/train.py:274), so higher penalises false

@@ -72,6 +72,13 @@ RUN python3 /tmp/honour-augmentation-rounds.py openwakeword/openwakeword/train.p
 COPY patches/feature-device-selection.py /tmp/feature-device-selection.py
 RUN python3 /tmp/feature-device-selection.py openwakeword/openwakeword/train.py
 
+# Patch: take the corpus directory from the config. Upstream derives it from
+# output_dir/model_name, which also names the exported model, so the openWakeWord
+# and microWakeWord corpora could not sit side by side under one wake word without
+# renaming the model. See patches/configurable-corpus-dir.py.
+COPY patches/configurable-corpus-dir.py /tmp/configurable-corpus-dir.py
+RUN python3 /tmp/configurable-corpus-dir.py openwakeword/openwakeword/train.py
+
 # Patch: hold the training features in VRAM rather than mmap. The 17.28 GB
 # ACAV100M array against 20 GB of RAM leaves training stalling on page faults -
 # GPU at 14%, CPU 37% idle, 7.2 GB swapped. Requires `docker compose stop kokoro
