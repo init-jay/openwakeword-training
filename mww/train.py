@@ -229,6 +229,17 @@ def main():
     if after is None:
         sys.exit(f"\nTRAINING FAILED: {model_path} does not exist "
                  f"(model_train_eval exited {result.returncode})")
+    # A FAILED CONVERSION LEAVES AN EMPTY FILE. TFLite opens the output before
+    # converting, so a crash during quantization calibration leaves 0 bytes behind -
+    # which existed, and had changed, and so passed both checks here until this was
+    # added. It reported "DONE ... (0 KB, md5 d41d8cd9)", d41d8cd9 being the md5 of
+    # nothing at all.
+    size = model_path.stat().st_size
+    if size < 1024:
+        sys.exit(f"\nTRAINING FAILED: {model_path} is {size} bytes - the TFLite "
+                 f"conversion did not produce a model (model_train_eval exited "
+                 f"{result.returncode}). Look for the traceback above; a failure in "
+                 f"quantization calibration is the usual cause.")
     if before is not None and before == after:
         sys.exit(f"\nTRAINING FAILED: {model_path} is unchanged from before this run - "
                  "it is the PREVIOUS model. Do not evaluate or deploy it.")

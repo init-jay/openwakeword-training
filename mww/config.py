@@ -34,12 +34,32 @@ from pathlib import Path
 
 import yaml
 
-# 1500 ms, against openWakeWord's 2000 ms window. This is the first place the two
-# pipelines genuinely diverge in a way that affects the corpus rather than the code:
-# a clip that sits comfortably in a 2 s window may not in 1.5 s. corpus/augment.py's
-# trimming makes this survivable - it is why the phrase is flush to the end - but the
-# alignment reasoning in tuning.md does NOT carry over unchecked.
-CLIP_DURATION_MS = 1500
+# 1520 ms, against openWakeWord's 2000 ms window. Two separate things pin this value.
+#
+# FIRST, THE FRONTEND. A clip that sits comfortably in a 2 s window may not in 1.5 s.
+# corpus/augment.py's trimming makes that survivable - it is why the phrase is flush
+# to the end - but the alignment reasoning in tuning.md does NOT carry over unchecked.
+#
+# SECOND, AND THE REASON IT IS NOT 1500: `spectrogram_length` MUST BE DIVISIBLE BY
+# `stride`. int8 quantization calibration asserts it while building the
+# representative dataset, which it feeds in stride-sized slices:
+#
+#     # microwakeword/utils.py:321
+#     assert spectrogram.shape[0] % stride == 0
+#
+# The failure lands AFTER training completes, during TFLite conversion, so a full run
+# is spent before it appears - and it leaves a 0-byte .tflite behind.
+#
+# The arithmetic: spectrogram_length grows by exactly one frame per `window_step_ms`
+# of clip duration, so each 20 ms step moves it by 1. At 1500 ms it is 179, and
+# 179 % 3 = 2. 1520 ms gives 180, which divides by the stride of 3.
+#
+# CHANGING `--stride` OR THE MIXCONV KERNELS CHANGES THIS. `spectrogram_length` is
+# `spectrogram_length_final_layer + spectrogram_slices_dropped(flags)`, and the second
+# term depends on the kernel sizes and stride (mixednet.py:108-128). If either moves,
+# re-derive the clip duration from the input shape the model prints at startup rather
+# than assuming 1520 still works.
+CLIP_DURATION_MS = 1520
 
 # 10 ms in the preprocessor, 20 ms as the model's window step. Upstream's default.
 WINDOW_STEP_MS = 20
