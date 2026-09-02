@@ -39,6 +39,7 @@ training never sees its own validation clips.
 """
 
 import argparse
+import shutil
 import sys
 from pathlib import Path
 
@@ -60,7 +61,7 @@ SPLITS = {
 
 
 def build_split(clips_dir: Path, out_root: Path, name: str, impulse, background,
-                split_seed=10, split_count=0.1, step_ms=None):
+                split_seed=10, split_count=0.1, step_ms=None, clean=False):
     step_ms = step_ms or mww_config.WINDOW_STEP_MS
     clips = Clips(
         input_directory=str(clips_dir),
@@ -88,8 +89,14 @@ def build_split(clips_dir: Path, out_root: Path, name: str, impulse, background,
         out = out_root / split / f"{name}_mmap"
         out.parent.mkdir(parents=True, exist_ok=True)
         if out.exists():
-            print(f"  {split}/{name}_mmap exists, skipping")
-            continue
+            if not clean:
+                # Skipping makes this resumable, but it also means features built
+                # from a PREVIOUS corpus survive a corpus rebuild - and nothing
+                # downstream can tell stale spectrograms from fresh ones.
+                print(f"  {split}/{name}_mmap exists, SKIPPING - stale if the corpus "
+                      f"changed since. Use --clean to rebuild.")
+                continue
+            shutil.rmtree(out)
         print(f"  {split}/{name}_mmap (slide_frames={slide_frames}) ...", flush=True)
         RaggedMmap.from_generator(
             out_dir=str(out),
@@ -109,6 +116,10 @@ def main():
     p.add_argument("--data-dir", default="data")
     p.add_argument("--split-seed", type=int, default=10)
     p.add_argument("--split-count", type=float, default=0.1)
+    p.add_argument("--clean", action="store_true",
+                   help="rebuild features that already exist. Required after "
+                        "regenerating the corpus - otherwise the old spectrograms "
+                        "are kept and silently trained on.")
     args = p.parse_args()
 
     safe = args.wake_word.replace(" ", "_").lower()
@@ -124,8 +135,8 @@ def main():
             sys.exit(f"no clips in {clips_dir} - run `python -m mww.corpus` first")
         print(f"\n[{label}] {n} clips -> {corpus / 'features' / label}")
         build_split(clips_dir, corpus / "features" / label, label,
-                    impulse, background,
-                    split_seed=args.split_seed, split_count=args.split_count)
+                    impulse, background, split_seed=args.split_seed,
+                    split_count=args.split_count, clean=args.clean)
 
     print(f"\nDONE  features under {corpus / 'features'}")
     print("\nNext:")

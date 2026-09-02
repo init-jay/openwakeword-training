@@ -33,6 +33,7 @@ THREE DIFFERENCES FROM THE openWakeWord CORPUS, all deliberate:
 """
 
 import argparse
+import shutil
 import sys
 from pathlib import Path
 
@@ -67,6 +68,10 @@ def main():
     p.add_argument("--corpus-root", default="my_custom_model")
     p.add_argument("--real-samples", default="my_real_samples")
     p.add_argument("--negatives-file", default=None)
+    p.add_argument("--clean", action="store_true",
+                   help="delete an existing corpus first. Required to regenerate - "
+                        "appending merges two runs and keeps clips from voices "
+                        "excluded since.")
     p.add_argument("--no-trim", action="store_true",
                    help="skip silence trimming. Almost certainly wrong: Piper "
                         "renderings carry a median 248 ms of trailing silence "
@@ -76,6 +81,34 @@ def main():
     safe = args.wake_word.replace(" ", "_").lower()
     root = Path(args.corpus_root) / safe / "mww"
     positives, negatives = root / "positives", root / "negatives"
+
+    # REFUSE TO APPEND TO AN EXISTING CORPUS. Generating into a non-empty directory
+    # silently merges two runs, and the merge is worse than it sounds:
+    #
+    #   * clips from voices excluded since the last run stay in the corpus - the
+    #     exclusion list is applied when GENERATING, not when reading
+    #   * add_child_range_copies globs the whole directory, so the previous run's
+    #     clips get a second set of shifted copies
+    #   * real recordings are copied again, changing their share of the corpus
+    #
+    # The result is a corpus no one intended, with no error and only a clip count to
+    # notice it by. train.py's setup_training_dirs rmtree's for the same reason.
+    existing = {d: len(list(d.glob("*.wav"))) for d in (positives, negatives)
+                if d.is_dir()}
+    if any(existing.values()):
+        if not args.clean:
+            print("REFUSING TO GENERATE: corpus already exists")
+            for d, n in existing.items():
+                print(f"  {d}  ({n} wav)")
+            print("\nGenerating on top of it would merge two runs - including clips")
+            print("from voices excluded since, and a second round of child-range")
+            print("copies over the old ones. Re-run with --clean to replace it.")
+            sys.exit(1)
+        for d in (positives, negatives):
+            if d.is_dir():
+                print(f"  removing {d} ({existing.get(d, 0)} wav)")
+                shutil.rmtree(d)
+
     positives.mkdir(parents=True, exist_ok=True)
     negatives.mkdir(parents=True, exist_ok=True)
 

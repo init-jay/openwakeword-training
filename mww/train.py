@@ -176,9 +176,26 @@ def main():
                 problems.append(f"no clips in {d}")
         elif fs["type"] == "mmap":
             problems.extend(check_mmap_set(Path(fs["features_dir"])))
-    if not any(fs["type"] == "mmap" for fs in cfg["features"]):
-        problems.append("no ambient negative sets - pass --ambient. Without them the "
-                        "model has never seen ordinary background and will fire on it")
+    # AMBIENT *EVALUATION* DATA IS WHAT MODEL SELECTION RUNS ON. The maximization
+    # metric is average_viable_recall, computed from false accepts per hour on
+    # validation_ambient. With no such data the metric is 0.000 at every step, the
+    # "best" checkpoint never improves on anything, and the exported model is
+    # whichever one happened to be current - while the ordinary accuracy/recall
+    # numbers still look excellent. Training sets alone are not enough.
+    ambient_eval = []
+    for fs in cfg["features"]:
+        if fs["type"] != "mmap":
+            continue
+        d = Path(fs["features_dir"])
+        for split in ("validation_ambient", "testing_ambient"):
+            if (d / split).is_dir() and any((d / split).glob("**/*_mmap")):
+                ambient_eval.append(f"{d.name}/{split}")
+    if not ambient_eval:
+        problems.append(
+            "no validation_ambient or testing_ambient data in any feature set. "
+            "average_viable_recall will be 0.000 at every step and model selection "
+            "will not work - the *_eval archives are the ones that carry these "
+            "splits (e.g. data/mww_ambient/dinner_party_eval)")
     if problems:
         print("\nREFUSING TO TRAIN:")
         for problem in problems:
