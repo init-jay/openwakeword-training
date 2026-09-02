@@ -32,6 +32,46 @@ RUN git clone https://github.com/OHF-Voice/micro-wake-word /opt/micro-wake-word 
     && git rev-parse HEAD > /opt/mww-commit.txt \
     && pip install --no-cache-dir -e .
 
+# THE CUDA LIBRARIES, WHICH THE -gpu IMAGE DOES NOT ACTUALLY CONTAIN.
+#
+# tensorflow/tensorflow:*-gpu ships TensorFlow BUILT for GPU but not the CUDA/cuDNN
+# runtime, so a container started with --gpus reports:
+#
+#   Failed to determine cuDNN version ... CUDNN_STATUS_INTERNAL_ERROR
+#   Cannot dlopen some GPU libraries ... Skipping registering GPU devices
+#
+# and trains on CPU without failing. The libraries come from the `[and-cuda]` extra
+# as nvidia-* pip wheels. Same version, so this adds the CUDA stack rather than
+# changing TensorFlow.
+#
+# WHETHER IT IS FASTER IS UNMEASURED. The CPU baseline is ~46 s per 500 steps on a
+# 25,537-parameter model - about 15 minutes for a 10,000-step run. A model this small
+# may not fill a GPU, and the Piper investigation in docker-compose.yml is a standing
+# reminder that "the GPU initialised" and "the GPU helped" are different claims.
+# Measure against the baseline before assuming this earned its ~3 GB.
+RUN pip install --no-cache-dir "tensorflow[and-cuda]==2.21.0"
+
+# Register the pip-shipped CUDA libraries with the dynamic linker. They install under
+# site-packages/nvidia/*/lib, which is not on the default search path, so without this
+# the wheels are present and still cannot be dlopen'd. Discovered from the installed
+# package rather than hardcoded, since the path moves with the Python version.
+RUN python3 -c "\
+import os, nvidia; \
+p = os.path.dirname(nvidia.__file__); \
+dirs = [os.path.join(p, d, 'lib') for d in sorted(os.listdir(p)) \
+        if os.path.isdir(os.path.join(p, d, 'lib'))]; \
+assert dirs, 'no nvidia/*/lib dirs - the [and-cuda] extra did not install'; \
+open('/etc/ld.so.conf.d/nvidia-pip.conf', 'w').write(chr(10).join(dirs) + chr(10)); \
+print('nvidia library paths:', len(dirs))" \
+    && ldconfig \
+    && python3 -c "\
+import ctypes, glob, os, nvidia; \
+p = os.path.dirname(nvidia.__file__); \
+libs = sorted(glob.glob(os.path.join(p, 'cudnn', 'lib', 'libcudnn.so*'))); \
+assert libs, 'libcudnn not found among the installed wheels'; \
+ctypes.CDLL(libs[-1]); \
+print('libcudnn loads:', os.path.basename(libs[-1]))"
+
 # PIN datasets BELOW 4.0, WITH ITS AUDIO EXTRAS.
 #
 # microWakeWord loads clips through `datasets.Audio()` (audio/clips.py:136-142), and
@@ -47,6 +87,7 @@ RUN git clone https://github.com/OHF-Voice/micro-wake-word /opt/micro-wake-word 
 # into an image that needs neither: this trainer is TensorFlow, and nothing here uses
 # torch for anything. 3.6 decodes with soundfile and resamples with librosa, both of
 # which resolve against the numpy 2 that mWW requires.
+#
 # tensorboard is needed even though nothing here looks at TensorBoard. mWW's
 # training loop calls `tf.summary.scalar` every eval_step_interval steps
 # (train.py:329), and TensorFlow raises TBNotInstalledError rather than skipping the
