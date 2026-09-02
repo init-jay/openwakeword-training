@@ -32,6 +32,23 @@ RUN git clone https://github.com/OHF-Voice/micro-wake-word /opt/micro-wake-word 
     && git rev-parse HEAD > /opt/mww-commit.txt \
     && pip install --no-cache-dir -e .
 
+# PIN datasets BELOW 4.0, WITH ITS AUDIO EXTRAS.
+#
+# microWakeWord loads clips through `datasets.Audio()` (audio/clips.py:136-142), and
+# datasets 4.x moved audio decoding to torchcodec:
+#
+#   ImportError: To support decoding audio data, please install 'torchcodec'.
+#
+# mWW's setup.py requires `datasets` unpinned, so a fresh build gets 4.x and fails at
+# the first clip - after building the model and loading the config, which makes it
+# look like a training problem rather than a dependency one.
+#
+# Pinning is the cheap fix. torchcodec would pull torch and FFmpeg shared libraries
+# into an image that needs neither: this trainer is TensorFlow, and nothing here uses
+# torch for anything. 3.6 decodes with soundfile and resamples with librosa, both of
+# which resolve against the numpy 2 that mWW requires.
+RUN pip install --no-cache-dir "datasets[audio]<4.0"
+
 # Fail the build rather than a training run if the stack does not import. pymicro-
 # features is the one most likely to be missing a wheel: it is a compiled extension,
 # and upstream's own notebook installs a fork of it for macOS.
@@ -45,7 +62,12 @@ assert numpy.__version__.split('.')[0] == '2', 'mWW needs numpy 2.x'" \
 from microwakeword.audio.clips import Clips; \
 from microwakeword.audio.spectrograms import SpectrogramGeneration; \
 from microwakeword.audio.augmentation import Augmentation; \
-print('microwakeword OK, pinned at', open('/opt/mww-commit.txt').read().strip())"
+print('microwakeword OK, pinned at', open('/opt/mww-commit.txt').read().strip())" \
+    && python3 -c "\
+import datasets, soundfile; \
+major = int(datasets.__version__.split('.')[0]); \
+print('datasets', datasets.__version__, 'soundfile', soundfile.__version__); \
+assert major < 4, 'datasets 4.x needs torchcodec to decode audio - see the pin above'"
 
 # The corpus layer is shared with the openWakeWord trainer - same 16 kHz mono WAVs,
 # different frontend downstream. mWW reads them through Clips(input_directory, ...),
