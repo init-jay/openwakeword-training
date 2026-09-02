@@ -34,37 +34,39 @@ from pathlib import Path
 
 import yaml
 
-# 1520 ms, against openWakeWord's 2000 ms window. Two separate things pin this value.
+# 1500 ms, against openWakeWord's 2000 ms window.
 #
-# FIRST, THE FRONTEND. A clip that sits comfortably in a 2 s window may not in 1.5 s.
+# THE FRONTEND. A clip that sits comfortably in a 2 s window may not in 1.5 s.
 # corpus/augment.py's trimming makes that survivable - it is why the phrase is flush
 # to the end - but the alignment reasoning in tuning.md does NOT carry over unchecked.
 #
-# SECOND, AND THE REASON IT IS NOT 1500: `spectrogram_length` MUST BE DIVISIBLE BY
-# `stride`. int8 quantization calibration asserts it while building the
-# representative dataset, which it feeds in stride-sized slices:
+# THE QUANTIZATION CONSTRAINT. `spectrogram_length` must be divisible by `stride`,
+# and int8 calibration asserts it AFTER training completes (utils.py:321) - so
+# getting it wrong costs a full run and leaves a 0-byte .tflite behind. At 10 ms
+# steps and stride 3, 1500 ms gives 204, which divides cleanly.
 #
-#     # microwakeword/utils.py:321
-#     assert spectrogram.shape[0] % stride == 0
-#
-# The failure lands AFTER training completes, during TFLite conversion, so a full run
-# is spent before it appears - and it leaves a 0-byte .tflite behind.
-#
-# The arithmetic is at the bottom of this file, reimplemented so it can be checked
-# before a run rather than discovered after one. The trap is that the frame step
-# includes the STRIDE - `window_step_samples = stride * 16000 * window_step_ms / 1000`
-# - so one frame is 60 ms here, not 20. Two attempts at this failed by moving the
-# clip duration 20 ms and changing nothing: 1500 and 1520 both give 179.
-#
-# 1560 ms gives 180, which divides by the stride of 3.
-#
-# DO NOT HAND-PICK THIS AFTER CHANGING `--stride` OR THE MIXCONV KERNELS.
-# check_quantization_constraint() derives it from the model flags and names a working
-# value; mww/train.py calls it before launching.
-CLIP_DURATION_MS = 1560
+# THIS VALUE IS COUPLED TO WINDOW_STEP_MS. At the earlier 20 ms step, 1500 gave 179
+# and had to move to 1560. Changing either requires re-deriving the other - do not
+# hand-pick it. check_quantization_constraint() at the bottom of this file derives it
+# from the model flags and names a working value, and mww/train.py calls it before
+# launching so the failure costs seconds rather than a full run.
+CLIP_DURATION_MS = 1500
 
-# 10 ms in the preprocessor, 20 ms as the model's window step. Upstream's default.
-WINDOW_STEP_MS = 20
+# 10 ms, MATCHING ESPHOME'S PREPROCESSOR. Not a free parameter.
+#
+# ESPHome's micro_wake_word generates 40 features every 10 ms, and mWW assumes the
+# preprocessor step equals this value:
+#
+#     preprocessor_window_step = config["window_step_ms"]   # model_train_eval.py:66
+#
+# so training at 20 ms builds a model expecting features at half the rate the device
+# delivers. That does not error on device - it detects badly, which is worse. The
+# manifest's `feature_step_size` is emitted from this constant (mww/manifest.py) so
+# the two cannot drift apart.
+#
+# It also sets the frame step for the quantization constraint, which is
+# `stride * window_step_ms` = 30 ms here. See CLIP_DURATION_MS.
+WINDOW_STEP_MS = 10
 
 # Augmentation corpora already on disk from setup-data.sh. mWW's Augmentation takes
 # the same two things openWakeWord's does, from the same downloads.
