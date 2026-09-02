@@ -47,7 +47,13 @@ RUN git clone https://github.com/OHF-Voice/micro-wake-word /opt/micro-wake-word 
 # into an image that needs neither: this trainer is TensorFlow, and nothing here uses
 # torch for anything. 3.6 decodes with soundfile and resamples with librosa, both of
 # which resolve against the numpy 2 that mWW requires.
-RUN pip install --no-cache-dir "datasets[audio]<4.0"
+# tensorboard is needed even though nothing here looks at TensorBoard. mWW's
+# training loop calls `tf.summary.scalar` every eval_step_interval steps
+# (train.py:329), and TensorFlow raises TBNotInstalledError rather than skipping the
+# write. The tensorflow/tensorflow image does not ship it and mWW's setup.py does not
+# ask for it, so training runs for exactly one eval interval - 500 steps - and then
+# dies, which reads like a training failure rather than a missing package.
+RUN pip install --no-cache-dir "datasets[audio]<4.0" tensorboard
 
 # Fail the build rather than a training run if the stack does not import. pymicro-
 # features is the one most likely to be missing a wheel: it is a compiled extension,
@@ -67,7 +73,14 @@ print('microwakeword OK, pinned at', open('/opt/mww-commit.txt').read().strip())
 import datasets, soundfile; \
 major = int(datasets.__version__.split('.')[0]); \
 print('datasets', datasets.__version__, 'soundfile', soundfile.__version__); \
-assert major < 4, 'datasets 4.x needs torchcodec to decode audio - see the pin above'"
+assert major < 4, 'datasets 4.x needs torchcodec to decode audio - see the pin above'" \
+    && python3 -c "\
+import tensorflow as tf; \
+tf.summary.scalar; \
+import tensorboard; print('tensorboard', tensorboard.__version__)" \
+    && python3 -c "\
+from ai_edge_litert.interpreter import Interpreter; \
+print('ai-edge-litert OK')"
 
 # The corpus layer is shared with the openWakeWord trainer - same 16 kHz mono WAVs,
 # different frontend downstream. mWW reads them through Clips(input_directory, ...),
