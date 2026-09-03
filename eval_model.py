@@ -4,7 +4,7 @@ Score a trained wake-word model against the four gates in tuning.md.
 
 Everything here is measured by streaming - `Model.predict_clip` slides the model
 over the clip 80 ms at a time, exactly as live detection does - because that is
-what the gates are about. `check_model_alignment.py` answers a different question
+what the gates are about. `eval/check_model_alignment.py` answers a different question
 (where in the window the model wants the phrase) by placing clips at fixed offsets;
 a clip that misses at one offset may well fire at the next one in streaming, so the
 two scripts are not interchangeable.

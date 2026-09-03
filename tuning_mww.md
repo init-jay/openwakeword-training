@@ -140,7 +140,7 @@ you.
 
 ### Not measured yet
 
-- **Alignment.** `check_model_alignment.py` is openWakeWord-only and its framing does
+- **Alignment.** `eval/check_model_alignment.py` is openWakeWord-only and its framing does
   not transfer (plan.md trap 4): it sweeps phrase placement in a 2000 ms window, and
   this is a streaming detector over 1500 ms with a sliding-window average. The latency
   above is the deployed quantity and is measured; where in its window the model wants

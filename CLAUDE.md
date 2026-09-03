@@ -16,9 +16,10 @@ docker compose build trainer                  # Build training image
 docker compose run --rm trainer ./setup-data.sh  # Download ~17GB training data
 docker compose run --rm trainer python train.py --wake-word "hey cal" --data-dir /app/data
 
-# Where does the trained model want the phrase in the window? (needs openwakeword)
-docker compose run --rm -v $(pwd)/check_model_alignment.py:/app/check_model_alignment.py \
-    trainer python check_model_alignment.py --model /app/my_custom_model/hey_cal.onnx
+# Where does the trained model want the phrase in the window? The `eval` image
+# carries the .onnx path and builds native on the Mac; a .tflite needs `trainer`.
+docker compose run --rm eval python -m eval.check_model_alignment \
+    --model my_custom_model/hey_cal.onnx
 
 # Convert to tflite. --no-deps because the conversion is CPU-only and does not
 # need the Kokoro GPU services that `trainer` otherwise starts.
@@ -55,7 +56,7 @@ python train.py --wake-word "hey cal"
 - `record_real_sample/record_samples.py` - records real voice samples. Own uv env; captures via ffmpeg (no PyAudio), reports peak/noise/SNR per take, and numbers files from the highest existing index so gaps never overwrite
 - `test_model.py` - live mic testing of trained models (streams raw PCM from ffmpeg's avfoundation input; no PyAudio)
 - `check_alignment.py` - reports where speech sits in the detection window (numpy + scipy only, so it runs anywhere)
-- `check_model_alignment.py` - the same question asked of a *trained* model: sweeps where the phrase is placed and reports the alignment the model learned, which is also its latency floor. Needs onnxruntime and an importable `openwakeword`, so run it in the trainer container (or with `PYTHONPATH` pointing at an openWakeWord checkout).
+- `eval/check_model_alignment.py` - the same question asked of a *trained* model: sweeps where the phrase is placed and reports the alignment the model learned, which is also its latency floor. openWakeWord only, and it does NOT go through `eval/backends.py` - it feeds the model one window of embeddings rather than streamed PCM, which is a different contract and a different question (see its docstring). Run it as a module from the repo root, in the `eval` image.
 
 ### Docker volume mounts
 - `./data` → `/app/data` - 17GB feature files, background audio, impulse responses

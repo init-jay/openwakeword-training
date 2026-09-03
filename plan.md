@@ -39,7 +39,7 @@ The seam is sharper than expected. Everything up to and including "a directory o
 | augmentation corpora | `setup-data.sh:36-97` | **already downloaded** (verified) |
 | 17 GB ACAV100M features | `data/*.npy` | **no** - wrong frontend |
 | trained `.onnx` models | `my_custom_model/` | **no** - no conversion path |
-| eval harness | `eval_model.py`, `compare_models.py`, `check_model_alignment.py` | **no, as written** - see phase 3 |
+| eval harness | `eval_model.py`, `compare_models.py`, `eval/check_model_alignment.py` | **no, as written** - see phase 3 |
 
 Two of those deserve emphasis.
 
@@ -78,6 +78,8 @@ One repo, two trainers behind a shared corpus layer. As built:
       manifest.py            -> the ESPHome/LVA JSON
     eval/
       backends.py            one streaming contract over the DEPLOYMENT runtime
+      check_model_alignment.py  openWakeWord window alignment - NOT on backends.py,
+                                see the correction in phase 3
 
 Corpora are siblings under `my_custom_model/<wake_word>/{oww,mww}/`, so neither
 trainer reaches into the other's. That nesting also fixed a bug: `setup_training_dirs`
@@ -325,7 +327,7 @@ first mWW model is measured in `tuning_mww.md`.
 
 ### The design changed in one important way: don't reimplement inference
 
-The plan above said to generalise `check_model_alignment.py`'s `WakeWordModel` into a
+The plan above said to generalise `eval/check_model_alignment.py`'s `WakeWordModel` into a
 two-backend interface. That was followed, and the first version of `backends.py` also
 **reimplemented microWakeWord's inference** - frontend loop, int8 quantization, slice
 striding, sliding-window average - from the training repo's source. That was wrong
@@ -355,6 +357,38 @@ Consequences worth stating:
   them through `openwakeword.model.Model` - comparable with `tuning.md`, not with a
   device. Converting `d1bb9f4` with `onnx2tflite.py` closes this.
 
+### Correction: "point all three tools at it" was wrong, and two is the right number
+
+The plan said to generalise the backend interface and point `compare_models.py`,
+`eval_model.py` and `eval/check_model_alignment.py` at it. The first two are on it. **The
+third is not, and should not be** - this is a wrong prediction in the plan, not an
+outstanding task.
+
+The premise was that all three tools loaded a model the same way, so all three could
+share one loader. They do load the same way; that is not what makes a shared interface
+possible. What matters is what they FEED it, and the alignment tool feeds something
+else entirely:
+
+| | input to the model | question |
+|---|---|---|
+| `eval_model.py`, `compare_models.py` | 16 kHz PCM, streamed | what would a detector see live? |
+| `eval/check_model_alignment.py` | one window of embeddings from `AudioFeatures.embed_clips`, placed at a fixed offset | where in its window does this model want the phrase? |
+
+`backends.py`'s contract is `score(pcm) -> (scores, offsets)`. The alignment tool never
+has PCM at the point it calls the model - it has already computed embeddings, and it
+deliberately does NOT stream, so that nothing in the streaming feature pipeline can be
+blamed for the result (its own docstring says so). Forcing it through the streaming
+contract would delete the property it exists to have.
+
+So `eval/check_model_alignment.py` keeps its own `WakeWordModel`, and the duplication
+between them is about fifteen lines of interpreter setup - cheaper than a shared
+abstraction that has to serve two different input types and two different questions.
+
+**What this does leave open is trap 4 below**, which is a real gap: there is no
+alignment measurement for microWakeWord at all. That is a tool that does not exist
+yet, not a tool pointed at the wrong loader - and the plan already said to redesign
+rather than port it.
+
 ### The four traps, as they actually bit
 
 1. **State leaks between clips - CONFIRMED, and worse than expected.** The obvious fix
@@ -378,13 +412,23 @@ Consequences worth stating:
    the threshold openWakeWord ships at. The sweep was extended upwards to 0.95;
    microWakeWord's usable range is 0.25 up, not 0.01 up. See `tuning_mww.md`.
 
-4. **Alignment means something different - NOT ADDRESSED.** `check_model_alignment.py`
-   remains openWakeWord-only. Latency from end of speech is measured for both by
-   `eval_model.py` and is the deployed quantity; where in its window a streaming model
-   wants the phrase still has no tool.
+4. **Alignment means something different - NOT ADDRESSED, and it is the one real gap
+   left in this phase.** `eval/check_model_alignment.py` remains openWakeWord-only, for the
+   reason in the correction above. Latency from end of speech IS measured for both by
+   `eval_model.py`, and that is the deployed quantity - but where in its window a
+   streaming detector wants the phrase has no tool, so the diagnosis that produced run
+   15's alignment fix has no microWakeWord equivalent. A new tool, not a port.
 
 The eval corpora themselves - `my_real_samples_holdout/`, `negatives_tts/` - carried
 over untouched, as predicted.
+
+### What is left in phase 3
+
+- **Trap 4**: an alignment measurement for microWakeWord.
+- **`d1bb9f4` on the deployment runtime**: convert with `onnx2tflite.py` so the
+  headline comparison stops being cross-runtime. Deliberately deferred.
+
+Everything else in this phase is built and exercised.
 
 ## What this plan does not do
 

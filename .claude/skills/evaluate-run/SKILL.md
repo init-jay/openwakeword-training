@@ -78,7 +78,7 @@ docker compose run --rm eval python compare_models.py --models <model> --sweep
 # 4. openWakeWord .onnx only: where in the window the model expects the phrase.
 #    Compare against TRAINED-set clips, not held-out, so it is comparable across runs.
 #    This one does NOT go through eval/backends.py — it has its own loader.
-docker compose run --rm eval python check_model_alignment.py \
+docker compose run --rm eval python -m eval.check_model_alignment \
     --model <model>.onnx --positives my_real_samples/jay
 ```
 
@@ -107,7 +107,7 @@ starting near 80 ms. A peak near 400+ ms means the training clips carried traili
 silence; a band reaching 0 ms means the model fires without hearing the word end,
 which tripled false accepts in run 5.
 
-`check_model_alignment.py` reaches for `ai-edge-litert` on a `.tflite`, which the eval
+`eval/check_model_alignment.py` reaches for `ai-edge-litert` on a `.tflite`, which the eval
 image does not carry — it uses the deployment runtime's bundled interpreter instead —
 so the `.tflite` path needs the trainer image. The tool's framing also does not
 transfer to microWakeWord — a streaming detector over a 1500 ms window with a
