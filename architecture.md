@@ -1,0 +1,1 @@
+record real, including hold outs data -> check real data ->  training runs [generate corpus (including synthetics) -> train model [oww, mww] ] -> generate eval synethtic corpus merge with hold outs -> eval trained models -> preflight check with live mic
