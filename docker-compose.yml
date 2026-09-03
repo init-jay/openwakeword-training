@@ -164,18 +164,22 @@ services:
   #   docker compose run --rm eval python -m eval.backends --model M
   #   docker compose run --rm eval python compare_models.py --models A B --sweep
   #
-  # Read-only mounts on everything but nothing: evaluation writes no files, and the
-  # corpora it reads are the ones a stray write would be most expensive to corrupt.
+  # THE CORPORA ARE READ-ONLY, THE MODEL DIRECTORY IS NOT. Evaluation itself writes
+  # nothing, and a stray write into a holdout or the negative corpus is the most
+  # expensive kind there is - it would silently change every number measured after it.
+  # my_custom_model is writable because `mww/manifest.py` writes the manifest there,
+  # and choosing its probability_cutoff is an evaluation decision, not a training one.
   eval:
     build:
       context: .
       dockerfile: Dockerfile.eval
     volumes:
       - ./eval:/app/eval:ro
+      - ./mww:/app/mww:ro
       - ./eval_model.py:/app/eval_model.py:ro
       - ./compare_models.py:/app/compare_models.py:ro
       - ./check_model_alignment.py:/app/check_model_alignment.py:ro
-      - ./my_custom_model:/app/my_custom_model:ro
+      - ./my_custom_model:/app/my_custom_model
       - ./my_real_samples_holdout:/app/my_real_samples_holdout:ro
       # Training positives, for the rare deliberate check against them. Scoring here
       # reports TRAINING accuracy - see rule 1 in tuning.md.

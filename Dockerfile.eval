@@ -32,7 +32,12 @@ RUN pip install --no-cache-dir \
     "pymicro-wakeword>=2,<3" \
     "pyopen-wakeword>=1,<2" \
     "numpy>=2,<3" \
-    scipy
+    scipy \
+    # PyYAML is not for evaluation. `mww/manifest.py` imports mww/config.py to read
+    # WINDOW_STEP_MS - so feature_step_size cannot drift from what training used -
+    # and that module parses YAML. Without it, cutting a manifest from a measured
+    # cutoff needs the trainer image, which defeats the point of this one.
+    PyYAML
 
 # The openWakeWord .onnx path, which is NOT the deployment runtime.
 #
