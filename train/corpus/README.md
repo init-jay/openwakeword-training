@@ -1,4 +1,4 @@
-# `corpus/` — engine-agnostic corpus construction
+# `train/corpus/` — engine-agnostic corpus construction
 
 Everything here operates on 16 kHz mono WAVs and knows nothing about how those clips
 later become features. That is the seam between openWakeWord (melspectrogram →
@@ -13,7 +13,7 @@ WAVs, separate after it. See `../plan.md`.
 | `real.py` | real recordings into a corpus, weighted by repetition |
 | `piper.py` | Piper generation over Wyoming, plus Piper voice metadata |
 
-These were moved out of `train.py` without behaviour change — sixteen runs of
+These were moved out of `train/oww/train.py` without behaviour change — sixteen runs of
 `../tuning.md` are calibrated against that behaviour. Anything that looks like it
 wants tidying probably encodes a measured result; check the notebook first.
 
@@ -31,12 +31,12 @@ is wrong, while `af_v0sky` is 16% below median and is fine.
 
 ### Running it
 
-`audit_voices.py` needs only numpy, scipy and requests — it is a network client, and
+`tools/audit_voices.py` needs only numpy, scipy and requests — it is a network client, and
 all the work happens on the TTS and ASR services. **It does not need the CUDA trainer
 image**, so run it anywhere, including a laptop:
 
 ```bash
-.venv-eval/bin/python audit_voices.py --wake-word "hey seeree" --tts piper \
+.venv-eval/bin/python -m tools.audit_voices --wake-word "hey seeree" --tts piper \
     --piper <piper-host>:10200 --asr <asr-host>:10300 \
     --out-dir voice_audit_piper
 ```
@@ -106,8 +106,8 @@ Sex here is only a proxy for F0, and F0 is measurable from the clips the audit a
 wrote:
 
 ```bash
-python measure_voice_f0.py voice_audit_piper/            # table, with the split
-python measure_voice_f0.py voice_audit_piper/ --python   # paste-ready dict body
+python -m tools.measure_voice_f0 voice_audit_piper/            # table, with the split
+python -m tools.measure_voice_f0 voice_audit_piper/ --python   # paste-ready dict body
 ```
 
 96 entries is more listening than anyone will actually do, which is the real argument
@@ -121,6 +121,6 @@ Leaving a voice out is deliberate rather than lazy: run 12 measured male voices 
 and training on an artefact teaches the artefact. A missing copy costs coverage; a
 wrong one costs correctness.
 
-`train.py` prints what fraction of the Piper set has a known sex, and warns when the
+`train/oww/train.py` prints what fraction of the Piper set has a known sex, and warns when the
 mispronunciation list is empty. It will not stop you — the warning exists because a
 silent run on a mislabelled corpus is the expensive outcome, not a loud one.

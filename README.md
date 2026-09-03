@@ -6,12 +6,12 @@ Train custom wake word models for [OpenWakeWord](https://github.com/dscripka/ope
 
 ## What You Get
 
-- A trained `.onnx` wake word model (~400KB), convertible to `.tflite` (see `onnx2tflite.py`)
+- A trained `.onnx` wake word model (~400KB), convertible to `.tflite` (see `train/oww/onnx2tflite.py`)
 - Works with OpenWakeWord, Home Assistant, wyoming-openwakeword, or anything that loads ONNX or tflite
 
 ### Typical results
 
-Measured for "hey seeree" on recordings made **after** the model trained, plus a 100-clip synthetic negative corpus (`eval_model.py`). Reported at the threshold that gives 8/32 false accepts on the adversarial categories — see the note on thresholds below, because the default 0.5 is not the right operating point:
+Measured for "hey seeree" on recordings made **after** the model trained, plus a 100-clip synthetic negative corpus (`eval/eval_model.py`). Reported at the threshold that gives 8/32 false accepts on the adversarial categories — see the note on thresholds below, because the default 0.5 is not the right operating point:
 
 | | result |
 |---|---|
@@ -35,7 +35,7 @@ Ten training runs, each measured rather than assumed. The findings that would tr
 
 **Real recordings are worth far more than their share of the corpus.** They are ~4% of the positives by default and they dominate the result. Raising `--real-copies` from 3 to 10 — the same 195 clips, no new recordings — took detection of run-on speech from 53% to 77% in a single training run. The copies are duplicated *before* augmentation, so each one picks up different background noise and reverb; ten copies become thirty acoustically distinct variants. That is the largest effect found across ten runs, bigger than the trailing margin, the speed range, or the negative-class loss weight. If you only change one thing, record more real speech and weight it heavily.
 
-**Measure on recordings made after the model trains.** `train.py` trains on everything in `my_real_samples/`, so scoring against that directory reports training accuracy. It overstated detection by ~10 points here, and hid a much larger gap on run-on speech. Record a held-out set into a directory outside that tree.
+**Measure on recordings made after the model trains.** `train/oww/train.py` trains on everything in `my_real_samples/`, so scoring against that directory reports training accuracy. It overstated detection by ~10 points here, and hid a much larger gap on run-on speech. Record a held-out set into a directory outside that tree.
 
 **Compare models at matched false-accept rates, never at a fixed threshold.** Two runs of an identical configuration read 77% and 67% on run-on speech at threshold 0.5, and both reach 95% at 8/32 false accepts. What varies between training runs is largely *where the score distribution sits*, not how well the model separates the classes — so a fixed-threshold comparison measures the operating point, not the model. Several apparent improvements during this work evaporated under matched comparison, in both directions.
 
@@ -47,7 +47,7 @@ Ten training runs, each measured rather than assumed. The findings that would tr
 
 **The detection threshold, not `max_negative_weight`, is the precision/recall knob.** Doubling the training weight reduced false accepts and cost detection — but compared at matched false-accept rates the two models traded places without either dominating. Retraining bought what a threshold change gives for free, and more: moving the threshold took one model from 67% to 95% on run-on speech.
 
-**Check that the GPU is actually being used.** onnxruntime falls back to CPU silently when its CUDA provider is missing, and openWakeWord picks its thread count from PyTorch — so a CUDA box with the CPU build computes features single-threaded. That was 36 minutes of an 83-minute run. `train.py` now reports the provider it resolved at startup.
+**Check that the GPU is actually being used.** onnxruntime falls back to CPU silently when its CUDA provider is missing, and openWakeWord picks its thread count from PyTorch — so a CUDA box with the CPU build computes features single-threaded. That was 36 minutes of an 83-minute run. `train/oww/train.py` now reports the provider it resolved at startup.
 
 ## Requirements
 
@@ -70,7 +70,7 @@ cd openwakeword-training
 
 ```bash
 docker compose build trainer
-docker compose run --rm trainer ./setup-data.sh
+docker compose run --rm trainer ./scripts/setup-data.sh
 ```
 
 ### 3. Record Your Voice — the highest-value step
@@ -80,7 +80,7 @@ docker compose run --rm trainer ./setup-data.sh
 Runs on your host machine (needs microphone access) in its own uv environment:
 
 ```bash
-cd record_real_sample
+cd record
 uv run record_samples.py --list-devices              # find your mic
 
 # continuous mode: speak, pause ~1s, repeat. ~100 clips in 3 minutes
@@ -101,7 +101,7 @@ Samples land in the repo's `my_real_samples/` regardless of where you run from.
 
 Levels are worth watching but are not sufficient — peak and SNR do not detect impulsive clicks, so listen to a few clips before committing to a long session.
 
-**Multiple speakers:** put each person in their own subdirectory — `train.py` searches `my_real_samples/` recursively and flattens the path into the training filename, so speakers with identical clip names don't collide:
+**Multiple speakers:** put each person in their own subdirectory — `train/oww/train.py` searches `my_real_samples/` recursively and flattens the path into the training filename, so speakers with identical clip names don't collide:
 
 ```
 my_real_samples/
@@ -116,7 +116,7 @@ Loose files directly in `my_real_samples/` still work. Keeping speakers separate
 Before committing to a multi-hour training run, verify your samples are usable:
 
 ```bash
-python check_alignment.py my_real_samples/ --verbose
+python record/check_alignment.py my_real_samples/ --verbose
 ```
 
 This reports how far each clip's speech sits from the end of OpenWakeWord's detection window, and flags clips with no detectable speech. Training trims silence automatically, so large trailing-silence numbers here are expected and fine — what matters is that speech is actually present and not clipped.
@@ -124,7 +124,7 @@ This reports how far each clip's speech sits from the end of OpenWakeWord's dete
 ### 4. Train Your Model
 
 ```bash
-docker compose run --rm trainer python train.py --wake-word "hey cal" --data-dir /app/data
+docker compose run --rm trainer python -m train.oww.train --wake-word "hey cal" --data-dir /app/data
 ```
 
 ### Training speed
@@ -158,8 +158,8 @@ Test on your host machine (needs microphone access):
 
 ```bash
 pip install openwakeword numpy
-python test_model.py --list-devices                             # find your mic
-python test_model.py --model my_custom_model/hey_cal.onnx --device 0
+python preflight/test_model.py --list-devices                             # find your mic
+python preflight/test_model.py --model my_custom_model/hey_cal.onnx --device 0
 ```
 
 Speak your wake word into the microphone and watch for detections. Capture goes through ffmpeg, so no PortAudio/PyAudio install is needed — just `ffmpeg` on your PATH.
@@ -170,20 +170,20 @@ Live testing tells you it works; these tell you how well, and are worth running 
 
 ```bash
 # build a targeted negative corpus, then score the model against it per category
-python generate_negatives.py --url http://localhost:8880/v1/audio/speech --out negatives_tts
-python eval_model.py --model my_custom_model/hey_cal.onnx \
+python -m eval.generate_negatives --url http://localhost:8880/v1/audio/speech --out negatives_tts
+python -m eval.eval_model --model my_custom_model/hey_cal.onnx \
     --positives my_real_samples --negatives negatives_tts
 
 # where in the detection window did the model actually learn to expect the phrase?
 python -m eval.check_model_alignment --model my_custom_model/hey_cal.onnx
 ```
 
-`eval_model.py` streams the model over each clip exactly as live detection does, and reports negatives **per category** — the corpus is adversarial by construction, so a pooled false-accept rate is meaningless. `eval/check_model_alignment.py` sweeps where the phrase sits in the window; the gap it peaks at is also the model's latency floor, since it cannot fire until that much audio has arrived after you stop speaking. Both accept `.onnx` or `.tflite` — prefer the `.tflite` if that is what you deploy.
+`eval/eval_model.py` streams the model over each clip exactly as live detection does, and reports negatives **per category** — the corpus is adversarial by construction, so a pooled false-accept rate is meaningless. `eval/check_model_alignment.py` sweeps where the phrase sits in the window; the gap it peaks at is also the model's latency floor, since it cannot fire until that much audio has arrived after you stop speaking. Both accept `.onnx` or `.tflite` — prefer the `.tflite` if that is what you deploy.
 
-**Score against recordings the model has never seen.** `train.py` trains on everything under `my_real_samples/`, so pointing `--positives` there reports training accuracy — it overstated detection by ~10 points here. Record a held-out set into a directory outside that tree, ideally after training has started:
+**Score against recordings the model has never seen.** `train/oww/train.py` trains on everything under `my_real_samples/`, so pointing `--positives` there reports training accuracy — it overstated detection by ~10 points here. Record a held-out set into a directory outside that tree, ideally after training has started:
 
 ```bash
-cd record_real_sample
+cd record
 uv run record_samples.py --wake-word "hey cal" \
     --output-dir ../my_real_samples_holdout/alex --continuous 180
 
@@ -194,18 +194,18 @@ uv run record_samples.py --wake-word "hey cal" \
 ```
 
 ```bash
-python eval_model.py --model my_custom_model/hey_cal.onnx \
+python -m eval.eval_model --model my_custom_model/hey_cal.onnx \
     --positives my_real_samples_holdout/alex --negatives negatives_tts
 ```
 
-`compare_models.py` compares several models **at matched false-accept rates**, tuning the threshold per model. Use it rather than comparing at 0.5 — two runs of an identical configuration measured 77% and 67% on run-on speech at 0.5 and were identical at matched precision, so a fixed-threshold comparison measures the operating point rather than the model:
+`eval/compare_models.py` compares several models **at matched false-accept rates**, tuning the threshold per model. Use it rather than comparing at 0.5 — two runs of an identical configuration measured 77% and 67% on run-on speech at 0.5 and were identical at matched precision, so a fixed-threshold comparison measures the operating point rather than the model:
 
 ```bash
-python compare_models.py --models my_custom_model/hey_seeree/*.onnx
-python compare_models.py --models my_custom_model/hey_cal.onnx --sweep   # choose a threshold
+python -m eval.compare_models --models my_custom_model/hey_seeree/*.onnx
+python -m eval.compare_models --models my_custom_model/hey_cal.onnx --sweep   # choose a threshold
 ```
 
-`generate_positives.py` builds synthetic positives across sweeps of speed, level, background noise, and phrase-runs-into-command. Useful for finding weaknesses, but treat it as a lower bound on difficulty: it scored a model at 100% on run-on speech that detected 46% of real run-ons.
+`eval/generate_positives.py` builds synthetic positives across sweeps of speed, level, background noise, and phrase-runs-into-command. Useful for finding weaknesses, but treat it as a lower bound on difficulty: it scored a model at 100% on run-on speech that detected 46% of real run-ons.
 
 ## Configuration
 
@@ -242,7 +242,7 @@ python compare_models.py --models my_custom_model/hey_cal.onnx --sweep   # choos
 
 **Do use similar-sounding negatives** — this reverses earlier advice in this README, which measurement contradicted. A model trained only on clearly-different phrases rejects exactly what it was shown and nothing adjacent: it scored 0/8 on other assistants' wake words and 0/36 on general conversation, but false-accepted 13/20 on the phrase continuing into another word ("hey serious" → 0.995) and 5/12 on "hey" plus a different name. Adding near-misses to the wordlist cut that to 4/20 on held-out confusables.
 
-`train.py` keeps these in `CONFUSABLE_NEGATIVES`, keyed by wake word; use `--negatives-file` for a phrase with no built-in list. It warns if you train without any. See `tuning.md` for the full measurements.
+`train/oww/train.py` keeps these in `CONFUSABLE_NEGATIVES`, keyed by wake word; use `--negatives-file` for a phrase with no built-in list. It warns if you train without any. See `tuning.md` for the full measurements.
 
 ### Why Silence Trimming Matters
 
@@ -287,13 +287,13 @@ if prediction["hey_cal"] > 0.5:
 If you prefer not to use Docker, you can set up the environment directly:
 
 ```bash
-./setup.sh
+./scripts/setup.sh
 source venv/bin/activate
 
 # Start Kokoro TTS separately
 docker run -d --gpus all -p 8880:8880 ghcr.io/remsky/kokoro-fastapi-gpu:latest
 
-python train.py --wake-word "hey cal"
+python -m train.oww.train --wake-word "hey cal"
 ```
 
 Note: This requires Python 3.10+ and working CUDA. The pinned dependency versions in `requirements.txt` can conflict with other Python packages on your system, which is why Docker is recommended.
@@ -313,12 +313,12 @@ Training metrics use synthetic test samples. Real-world performance is usually b
 
 ### TFLite conversion error at end
 Ignore - the ONNX model is saved successfully before this error. openWakeWord converts
-through `onnx_tf`, which this image does not carry; convert with `onnx2tflite.py`
+through `onnx_tf`, which this image does not carry; convert with `train/oww/onnx2tflite.py`
 instead, which verifies the result against the source ONNX:
 
 ```bash
 docker compose run --rm --no-deps trainer \
-    python onnx2tflite.py /app/my_custom_model/hey_seeree/hey_seeree_92ac528.onnx \
+    python -m train.oww.onnx2tflite /app/my_custom_model/hey_seeree/hey_seeree_92ac528.onnx \
         -o /app/my_custom_model/hey_seeree/hey_seeree_92ac528.tflite
 ```
 

@@ -62,9 +62,7 @@ from pathlib import Path
 import numpy as np
 import scipy.io.wavfile
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from eval import backends  # noqa: E402
+from eval import backends
 
 SR = 16000
 NOISE_FLOOR = 30.0          # std dev in 16-bit counts; stands in for room tone

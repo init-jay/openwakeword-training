@@ -37,13 +37,18 @@ import shutil
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# The REPO ROOT. This package sits at train/mww/ since the reorg, so the root is
+# two levels up, not one - the old value now points at train/.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from corpus.augment import CHILD_STRETCH_FRACTION, add_child_range_copies, trim_directory
-from corpus.negatives import build_negative_phrases
-from corpus.piper import generate_piper_samples, select_piper_voices
-from corpus.positives import PLAIN_SPEED_GRID, plain_positive_texts
-from corpus.real import copy_real_samples
+from train.corpus.augment import (CHILD_STRETCH_FRACTION,  # noqa: E402
+                                  add_child_range_copies, trim_directory)
+from train.corpus.negatives import build_negative_phrases  # noqa: E402
+from train.corpus.piper import (generate_piper_samples,  # noqa: E402
+                                select_piper_voices)
+from train.corpus.positives import (PLAIN_SPEED_GRID,  # noqa: E402
+                                    plain_positive_texts)
+from train.corpus.real import copy_real_samples  # noqa: E402
 
 
 def main():

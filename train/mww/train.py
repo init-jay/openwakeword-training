@@ -26,11 +26,13 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# The REPO ROOT. This package sits at train/mww/ since the reorg, so the root is
+# two levels up, not one - the old value now points at train/.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import yaml  # noqa: E402
 
-from mww import config as mww_config  # noqa: E402
+from train.mww import config as mww_config  # noqa: E402
 
 # The quantized streaming model is the one that ships. model_train_eval writes up to
 # four variants; only this one is a TFLite Micro streaming model with internal state,

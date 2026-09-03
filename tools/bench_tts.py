@@ -32,7 +32,7 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.resolve()))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # The phrase and a run-on, because synthesis cost scales with output length and a
 # corpus is made of both.
@@ -40,7 +40,7 @@ PHRASES = ["hey seeree", "hey seeree what is on tonight"]
 
 
 def piper_caller(host, port, voice):
-    from corpus.piper import piper_render
+    from train.corpus.piper import piper_render
 
     def call(i):
         return piper_render(host, port, voice, None, PHRASES[i % len(PHRASES)], 1.0)

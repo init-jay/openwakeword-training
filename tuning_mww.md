@@ -21,14 +21,14 @@ microWakeWord model is loaded from its **manifest .json**, not the bare `.tflite
 `sliding_window_size` is under test alongside the weights.
 
     docker compose build eval          # native arm64, runs on the Mac
-    docker compose run --rm eval python compare_models.py --models A B --sweep
+    docker compose run --rm eval python -m eval.compare_models --models A B --sweep
 
 One asymmetry to keep in view, because it is not yet resolved: **the openWakeWord side
 is NOT measured on the deployment runtime.** `pyopen-wakeword` is TFLite-only and every
 recent openWakeWord ship candidate here is `.onnx`, so `d1bb9f4` is scored through
 `openwakeword.model.Model` - the path all seventeen runs of `tuning.md` were measured
 on. That makes it comparable with the notebook and *not* a deployment measurement.
-Converting `d1bb9f4` with `onnx2tflite.py` and re-scoring is the outstanding job.
+Converting `d1bb9f4` with `train/oww/onnx2tflite.py` and re-scoring is the outstanding job.
 
 ---
 
@@ -78,11 +78,11 @@ The single most important operational finding, and it is not visible in the ROC 
 | 0.15 | 100 / 100 | **32/32** | **68/68** |
 
 **Every negative in the corpus fires at 0.15 and below.** The resting score of this
-model is 0.245 - `eval_model.py` reports exactly that as the median for every negative
+model is 0.245 - `eval/eval_model.py` reports exactly that as the median for every negative
 category - so a cutoff under it accepts everything. openWakeWord's operating point is
 0.15 and `tuning.md` sweeps to 0.01; carrying either habit across would produce a
 detector that never stops firing. **microWakeWord's usable range is 0.25 upwards.**
-`compare_models.py`'s sweep was extended to 0.95 for this reason.
+`eval/compare_models.py`'s sweep was extended to 0.95 for this reason.
 
 Score resolution is 0.00078 (an int8 output, 256 levels, averaged over a window of 5),
 so sweeping finer than that measures quantization rather than the model.
@@ -113,7 +113,7 @@ is small enough not to be a deployment argument either way.
 ### The shipped manifest could not fire, and nothing downstream would have caught it
 
 `hey_seeree.json` shipped with `probability_cutoff: 1.0`, at which this model detects
-nothing. The cause is in `mww/manifest.py`: `--max-faph` defaults to 0.0, and the only
+nothing. The cause is in `train/mww/manifest.py`: `--max-faph` defaults to 0.0, and the only
 ROC row with faph 0.000 is the **synthetic terminator** microWakeWord's
 `generate_roc_curve` appends at (faph 0, frr 1) to close the curve when no measured
 cutoff reaches the floor. It is not an operating point; it is a plotting artifact, and

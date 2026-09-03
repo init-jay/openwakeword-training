@@ -63,8 +63,7 @@ import numpy as np
 
 # Reuse the scoring path from eval_model.py so both tools agree exactly: same
 # streaming, same noise-floor padding, same per-clip RNG seed.
-import eval_model as ev
-from eval import backends
+from eval import backends, eval_model as ev
 
 ADVERSARIAL_PREFIXES = ("extend_", "hey_other_")
 FA_POINTS = (2, 4, 6, 8, 10, 12)

@@ -99,7 +99,7 @@ x-kokoro: &kokoro
 x-piper: &piper
   build:
     context: .
-    dockerfile: Dockerfile.piper
+    dockerfile: docker/Dockerfile.piper
   volumes:
     # Voices are downloaded on demand and get large - libritts_r alone carries 904
     # speakers - so they persist here rather than in the container.
@@ -162,7 +162,7 @@ services:
   #
   #   docker compose build eval
   #   docker compose run --rm eval python -m eval.backends --model M
-  #   docker compose run --rm eval python compare_models.py --models A B --sweep
+  #   docker compose run --rm eval python -m eval.compare_models --models A B --sweep
   #
   # THE CORPORA ARE READ-ONLY, THE MODEL DIRECTORY IS NOT. Evaluation itself writes
   # nothing, and a stray write into a holdout or the negative corpus is the most
@@ -172,12 +172,12 @@ services:
   eval:
     build:
       context: .
-      dockerfile: Dockerfile.eval
+      dockerfile: docker/Dockerfile.eval
     volumes:
       - ./eval:/app/eval:ro
-      - ./mww:/app/mww:ro
-      - ./eval_model.py:/app/eval_model.py:ro
-      - ./compare_models.py:/app/compare_models.py:ro
+      # train/ for `python -m train.mww.manifest`, which cuts the ESPHome manifest
+      # from a measured cutoff - an evaluation decision, so it belongs in this image.
+      - ./train:/app/train:ro
       - ./my_custom_model:/app/my_custom_model
       - ./my_real_samples_holdout:/app/my_real_samples_holdout:ro
       # Training positives, for the rare deliberate check against them. Scoring here
@@ -194,7 +194,7 @@ services:
   mww:
     build:
       context: .
-      dockerfile: Dockerfile.mww
+      dockerfile: docker/Dockerfile.mww
     deploy:
       resources:
         reservations:
@@ -214,7 +214,9 @@ services:
     shm_size: "8gb"
 
   trainer:
-    build: .
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
     deploy:
       resources:
         reservations:

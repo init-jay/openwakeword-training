@@ -30,21 +30,35 @@ import scipy.io.wavfile
 import yaml
 from tqdm import tqdm
 
+# THE REPO ROOT, NOT THIS FILE'S DIRECTORY. Every path in this module is relative -
+# data/, my_real_samples/, my_custom_model/ - and the chdir below is what anchors
+# them. While this file lived at the repo root the two were the same thing; since it
+# moved to train/oww/ they are three levels apart, and getting this wrong does not
+# raise. It builds a corpus under train/oww/ and trains on nothing.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Importable when run as `python train/oww/train.py` as well as `python -m
+# train.oww.train`; the plain-path form puts train/oww/ on sys.path, not the root.
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 # The engine-agnostic half of corpus construction, shared with the microWakeWord
 # trainer (see plan.md). Moved out of this file without behaviour change; the
 # reasoning that used to live here moved with it.
-from corpus.augment import (CHILD_STRETCH, CHILD_STRETCH_FRACTION,
-                            add_child_range_copies, trim_directory, trim_silence)
-from corpus.negatives import (MISPRONOUNCING_VOICES, TRAINING_COMMANDS,
-                              build_negative_phrases)
-from corpus.piper import generate_piper_samples, select_piper_voices
-from corpus.positives import (PLAIN_SPEED_GRID, PLAIN_SPEEDS,
-                              plain_positive_texts)
-from corpus.real import copy_real_samples
+from train.corpus.augment import (CHILD_STRETCH, CHILD_STRETCH_FRACTION,  # noqa: E402
+                                  add_child_range_copies, trim_directory,
+                                  trim_silence)
+from train.corpus.negatives import (MISPRONOUNCING_VOICES,  # noqa: E402
+                                    TRAINING_COMMANDS, build_negative_phrases)
+from train.corpus.piper import (generate_piper_samples,  # noqa: E402
+                                select_piper_voices)
+from train.corpus.positives import (PLAIN_SPEED_GRID, PLAIN_SPEEDS,  # noqa: E402
+                                    plain_positive_texts)
+from train.corpus.real import copy_real_samples  # noqa: E402
 
 warnings.filterwarnings("ignore", message="Reached EOF prematurely")
 
-WORK_DIR = Path(__file__).parent.resolve()
+WORK_DIR = REPO_ROOT
 os.chdir(WORK_DIR)
 
 # BASE_NEGATIVES, TRAINING_COMMANDS, MISPRONOUNCING_VOICES and

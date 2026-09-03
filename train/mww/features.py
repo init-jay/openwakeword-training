@@ -43,14 +43,16 @@ import shutil
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# The REPO ROOT. This package sits at train/mww/ since the reorg, so the root is
+# two levels up, not one - the old value now points at train/.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from mmap_ninja.ragged import RaggedMmap  # noqa: E402
 from microwakeword.audio.augmentation import Augmentation  # noqa: E402
 from microwakeword.audio.clips import Clips  # noqa: E402
 from microwakeword.audio.spectrograms import SpectrogramGeneration  # noqa: E402
 
-from mww import config as mww_config  # noqa: E402
+from train.mww import config as mww_config  # noqa: E402
 
 # split -> (Clips generator mode, slide_frames). Upstream's notebook values.
 SPLITS = {

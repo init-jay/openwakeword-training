@@ -126,9 +126,9 @@ print('ai-edge-litert OK')"
 # The corpus layer is shared with the openWakeWord trainer - same 16 kHz mono WAVs,
 # different frontend downstream. mWW reads them through Clips(input_directory, ...),
 # so nothing needs converting.
-COPY corpus/ ./corpus/
-COPY mww/ ./mww/
-COPY setup-mww-data.sh .
+COPY train/ ./train/
+COPY scripts/setup-mww-data.sh .
 RUN chmod +x setup-mww-data.sh
 
-RUN python3 -c "import corpus.augment, corpus.negatives, corpus.real, corpus.piper"
+RUN python3 -c "import train.corpus.augment, train.corpus.negatives, \
+                       train.corpus.real, train.corpus.piper"

@@ -6,8 +6,10 @@
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+# The REPO ROOT, not this script's directory - it moved to scripts/ in the reorg and
+# everything below writes into data/, venv/ and the tree at the top level.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
 
 echo "=== OpenWakeWord Trainer Setup ==="
 echo ""
@@ -165,8 +167,8 @@ echo "     docker run -d --gpus all -p 8880:8880 ghcr.io/remsky/kokoro-fastapi-g
 echo ""
 echo "  2. Record your voice samples (optional but recommended):"
 echo "     source venv/bin/activate"
-echo "     cd record_real_sample && uv run record_samples.py --wake-word \"hey cal\""
+echo "     cd record && uv run record_samples.py --wake-word \"hey cal\""
 echo ""
 echo "  3. Train your model:"
-echo "     python train.py --wake-word \"hey cal\""
+echo "     python -m train.oww.train --wake-word \"hey cal\""
 echo ""

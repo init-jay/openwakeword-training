@@ -57,9 +57,11 @@ import re
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# The REPO ROOT. This package sits at train/mww/ since the reorg, so the root is
+# two levels up, not one - the old value now points at train/.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from mww import config as mww_config  # noqa: E402
+from train.mww import config as mww_config  # noqa: E402
 
 QUANT_DIR = "tflite_stream_state_internal_quant"
 MODEL_FILE = "stream_state_internal_quant.tflite"

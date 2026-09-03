@@ -17,8 +17,8 @@
 #     it away.
 #
 # Usage:
-#   ./run-training.sh "hey seeree"
-#   ./run-training.sh "hey seeree" --samples-per-voice 400 --training-steps 100000
+#   ./scripts/run-training.sh "hey seeree"
+#   ./scripts/run-training.sh "hey seeree" --samples-per-voice 400 --training-steps 100000
 #
 # Any extra arguments are passed through to train.py.
 
@@ -31,7 +31,9 @@ if [[ -z "$WAKE_WORD" ]]; then
 fi
 shift
 
-cd "$(dirname "$0")"
+# The REPO ROOT, not this script's directory - it moved to scripts/ in the reorg
+# and every docker compose call below needs the compose file in the working dir.
+cd "$(dirname "$0")/.."
 
 # tr rather than ${x,,} so this does not need bash 4 (macOS ships 3.2).
 SAFE_NAME="$(printf '%s' "$WAKE_WORD" | tr ' [:upper:]' '_[:lower:]')"
@@ -127,7 +129,7 @@ WATCH_PID=$!
 
 # Build the command with each argument quoted, so it survives being passed to
 # `script` as a single string.
-CMD="docker compose run --rm trainer python train.py"
+CMD="docker compose run --rm trainer python -m train.oww.train"
 CMD="$CMD --wake-word $(printf '%q' "$WAKE_WORD") --data-dir /app/data"
 for arg in "$@"; do CMD="$CMD $(printf '%q' "$arg")"; done
 
@@ -175,7 +177,7 @@ fi
 if [[ $STATUS -ne 0 ]]; then
     echo "=== NOTE: training exited $STATUS but the model WAS written."
     echo "    Normally the tflite conversion failing after the .onnx is saved."
-    echo "    Convert with onnx2tflite.py, which verifies the result."
+    echo "    Convert with train/oww/onnx2tflite.py, which verifies the result."
 fi
 
 # Name the output by commit so a model can be traced back to the code that made it.
@@ -191,4 +193,5 @@ echo "    $TAGGED  ($(du -h "$TAGGED" | cut -f1), md5 ${AFTER_SUM:0:8})"
 [[ -n "$DIRTY" ]] && echo "    NOTE: working tree was dirty - this model is not reproducible from $COMMIT"
 echo
 echo "    scp to the eval machine, then:"
-echo "      python compare_models.py --models <new> <previous-best>"
+echo "      docker compose run --rm eval python -m eval.compare_models \\"
+echo "          --models <new> <previous-best>"

@@ -83,18 +83,17 @@ phrase in both turns a generalisation measurement into a memorisation one.
 | 3 · evaluate | No window-alignment measurement for microWakeWord. `eval/check_model_alignment.py` is openWakeWord-only, and its framing does not transfer to a streaming detector with a sliding-window average. |
 | 4 · preflight | **No microWakeWord path at all.** `test_model.py` loads through `openwakeword.model.Model`, so a microWakeWord model cannot currently be preflighted on a live mic — the last gate before deploy does not cover half the diagram. |
 
-## Proposed file layout
+## File layout
 
-The directory tree does not currently reflect the diagram: fourteen scripts sit at the
-repo root in no particular order, and the only packages that exist (`corpus/`, `mww/`,
-`eval/`) were each created for a different reason. This is what the four steps would
-look like as directories.
+**Implemented.** Before this, fourteen scripts sat at the repo root in no particular
+order and the only packages that existed (`corpus/`, `mww/`, `eval/`) had each been
+created for a different reason. One directory per pipeline step now:
 
 ```
 record/                     1 · record and check
   record_samples.py             was record_real_sample/
   check_alignment.py            was root
-  pyproject.toml, uv.lock       its own uv env - keep them together
+  pyproject.toml, uv.lock       its own uv env - kept together
 
 train/                      2 · training run
   corpus/                       was root corpus/ - shared by both trainers
@@ -141,13 +140,18 @@ holds between sit in unrelated places with nothing structural saying they are a 
 `train/corpus/negatives.py` beside `eval/generate_negatives.py` makes the rule visible
 in the tree.
 
-### What breaks, and the fix
+Everything runs as a module from the repo root: `python -m train.oww.train`,
+`python -m eval.compare_models`, `python -m train.mww.manifest`.
 
-Not a big list, but the first one is a trap rather than an inconvenience.
+### What broke, and the fix
+
+Not a big list, but the first one was a trap rather than an inconvenience, and a
+second of the same kind turned up during the move.
 
 | what | why | fix |
 |---|---|---|
-| **`train.py` chdir** | `train.py:47` does `os.chdir(Path(__file__).parent)` at import. Moved to `train/oww/`, the working directory becomes `train/oww/` and every relative path it uses — `data/`, `my_real_samples/`, `my_custom_model/` — resolves under there instead of the repo root. It will not error; it will build a corpus in the wrong place. | anchor to the repo root: `WORK_DIR = Path(__file__).resolve().parents[2]` |
+| **`train.py` chdir** | `train.py:47` did `os.chdir(Path(__file__).parent)` at import. Moved to `train/oww/`, the working directory becomes `train/oww/` and every relative path it uses — `data/`, `my_real_samples/`, `my_custom_model/` — resolves under there instead of the repo root. It does not error; it builds a corpus in the wrong place. | anchored to the repo root: `REPO_ROOT = Path(__file__).resolve().parents[2]` |
+| **the same bug in the shell scripts** | found during the move, not predicted above. `run-training.sh` and `setup.sh` both did `cd "$(dirname "$0")"`. From `scripts/` that lands in `scripts/`, where there is no compose file and no `data/`. Same failure shape as the chdir: wrong directory, no error. | `cd "$(dirname "$0")/.."` |
 | Dockerfile `COPY` | `COPY corpus/ ./corpus/`, `COPY train.py .`, `COPY mww/ ./mww/` in `Dockerfile` and `Dockerfile.mww` | follow the moves; keep the in-image layout flat if that is simpler than mirroring |
 | compose mounts | the `eval` service mounts `eval_model.py` and `compare_models.py` as individual files | collapses to the single `./eval:/app/eval:ro` mount that is already there |
 | invocation | `python eval_model.py` becomes `python -m eval.eval_model`, etc. | update README, CLAUDE.md and the `evaluate-run` skill together |
@@ -157,13 +161,18 @@ Filenames stay as they are — `eval/eval_model.py`, not `eval/model.py`. `tunin
 refers to these scripts by name throughout, and being able to grep the notebook against
 the tree is worth more than removing a stutter.
 
-### Order, and the gate
+### The gate
 
-One commit, no behaviour changes, `git mv` throughout so history follows. Then the
-repo's own discipline applies: **re-run one evaluation before and after and require
-identical numbers.** A reorg that quietly changes a path is exactly the class of bug
-that produced a confident wrong answer eight times in `tuning.md`, and it is cheap to
-rule out here — `compare_models.py` on a fixed model and corpus is deterministic.
+`git mv` throughout, so history follows every file. Then the repo's own discipline:
+**the same evaluation was run before and after and required to produce identical
+output.** It did — `compare_models.py` on `d1bb9f4` and the microWakeWord manifest,
+against jay's holdout with `--sweep`, byte-for-byte identical across the move. A reorg
+that quietly changes a path is exactly the class of bug that produced a confident wrong
+answer eight times in `tuning.md`, and it was cheap to rule out.
 
-The `1_datagen/`, `2_train/`, `3_eval/` directories `plan.md` describes as "still empty"
-are already gone; that line is stale.
+Also verified after the move: `eval.eval_model`, `eval.check_model_alignment`,
+`eval.backends --model`, `train.mww.manifest`, the `eval` image build, and the import
+check the trainer and mWW images run at build time (`import train.corpus.augment, ...`),
+exercised in the eval image since those two are CUDA/amd64 and cannot build on the Mac.
+
+`tuning.md`'s run sections keep their old paths, with one note at the top saying so.

@@ -4,7 +4,7 @@ Target: [OHF-Voice/micro-wake-word](https://github.com/OHF-Voice/micro-wake-word
 wake-word runtime ESPHome uses on ESP32. Output is an int8-quantised streaming
 `.tflite` plus a JSON manifest, not an ONNX.
 
-Phases 1 and 2 are BUILT and running; phase 3 is not started. Sections written before
+Phases 1, 2 and 3 are BUILT and running; phase 0 was skipped. Sections written before
 they were built are kept where the reasoning still holds and marked where it did not -
 several confident claims here were wrong, and which ones is the useful part.
 
@@ -30,16 +30,16 @@ The seam is sharper than expected. Everything up to and including "a directory o
 
 | asset | file | reusable? |
 |---|---|---|
-| silence trimming | `train.py:989` `trim_silence`, `:1035` `trim_directory` | yes - operates on arrays |
-| child-range copies | `train.py:869-988` `time_stretch`, `vocal_tract_shift`, `add_child_range_copies` | yes |
-| run-on positives | `train.py:693` `generate_runon_samples`, `RUNON_TAIL_MS` | yes |
-| real-sample handling | `train.py:803` `copy_real_samples` (recursive, path-flattening) | yes |
-| adversarial negatives | `generate_negatives.py` `EXTEND`/`RUNNING`/`HEY_OTHER`/... | yes, as audio |
-| Piper voice audit | `audit_voices.py` + 252 renders in `voice_audit_piper/` | yes - **and mWW needs it more** |
-| augmentation corpora | `setup-data.sh:36-97` | **already downloaded** (verified) |
+| silence trimming | `train/oww/train.py:989` `trim_silence`, `:1035` `trim_directory` | yes - operates on arrays |
+| child-range copies | `train/oww/train.py:869-988` `time_stretch`, `vocal_tract_shift`, `add_child_range_copies` | yes |
+| run-on positives | `train/oww/train.py:693` `generate_runon_samples`, `RUNON_TAIL_MS` | yes |
+| real-sample handling | `train/oww/train.py:803` `copy_real_samples` (recursive, path-flattening) | yes |
+| adversarial negatives | `eval/generate_negatives.py` `EXTEND`/`RUNNING`/`HEY_OTHER`/... | yes, as audio |
+| Piper voice audit | `tools/audit_voices.py` + 252 renders in `voice_audit_piper/` | yes - **and mWW needs it more** |
+| augmentation corpora | `scripts/setup-data.sh:36-97` | **already downloaded** (verified) |
 | 17 GB ACAV100M features | `data/*.npy` | **no** - wrong frontend |
 | trained `.onnx` models | `my_custom_model/` | **no** - no conversion path |
-| eval harness | `eval_model.py`, `compare_models.py`, `eval/check_model_alignment.py` | **no, as written** - see phase 3 |
+| eval harness | `eval/` (`eval_model.py`, `compare_models.py`, `check_model_alignment.py`) | **no, as written** - see phase 3 |
 
 Two of those deserve emphasis.
 
@@ -61,35 +61,58 @@ model → 96-dim embeddings over a 2000 ms window; microWakeWord is 40 features 
 
 ## Layout
 
-One repo, two trainers behind a shared corpus layer. As built:
+One repo, two trainers behind a shared corpus layer. **Reorganised to follow
+`architecture.md`'s four pipeline steps** - one directory per step, no loose scripts at
+the root:
 
-    corpus/                  engine-agnostic, extracted from train.py
-      augment.py             trimming, child-range copies
-      negatives.py           the negative wordlist
-      positives.py           phrase texts + speed grid (tuned; shared so they cannot drift)
-      piper.py               Wyoming generation, voice audit lists, F0 sex map
-      real.py                real recordings into a corpus
-    train.py                 openWakeWord trainer (unchanged behaviour)
-    mww/
-      corpus.py              WAVs -> my_custom_model/<ww>/mww/{positives,negatives}
-      features.py            -> .../mww/features/<set>/<split>/*_mmap
-      config.py              -> the training YAML
-      train.py               -> quantized streaming tflite
-      manifest.py            -> the ESPHome/LVA JSON
-    eval/
+    record/                  1 - record and check real speech (own uv env)
+      record_samples.py, check_alignment.py
+    train/                   2 - training run
+      corpus/                engine-agnostic, extracted from train.py, shared
+        augment.py           trimming, child-range copies
+        negatives.py         the negative wordlist
+        positives.py         phrase texts + speed grid (shared so they cannot drift)
+        piper.py             Wyoming generation, voice audit lists, F0 sex map
+        real.py              real recordings into a corpus
+      oww/
+        train.py             openWakeWord trainer (unchanged behaviour)
+        onnx2tflite.py       -> the .tflite that pyopen-wakeword can read
+      mww/
+        corpus.py            WAVs -> my_custom_model/<ww>/mww/{positives,negatives}
+        features.py          -> .../mww/features/<set>/<split>/*_mmap
+        config.py            -> the training YAML
+        train.py             -> quantized streaming tflite
+        manifest.py          -> the ESPHome/LVA JSON
+    eval/                    3 - eval model
+      generate_negatives.py  the eval corpus; DISJOINT from train/corpus/negatives.py
+      generate_positives.py  the synthetic speed sweep
       backends.py            one streaming contract over the DEPLOYMENT runtime
+      eval_model.py          gates, per-category false accepts, latency
+      compare_models.py      matched false accepts
       check_model_alignment.py  openWakeWord window alignment - NOT on backends.py,
                                 see the correction in phase 3
+    preflight/               4 - live-mic preflight
+      test_model.py
+    tools/                   not in the pipeline: audit_voices, bench_tts, measure_voice_f0
+    docker/                  Dockerfile{,.mww,.piper,.eval}
+    scripts/                 setup*.sh, run-training.sh
+
+Everything is run as a module from the repo root - `python -m train.oww.train`,
+`python -m eval.compare_models`. **Two path anchors had to move with the files and
+neither would have failed loudly:** `train/oww/train.py` chdir'd to its own directory
+(now `parents[2]`, the repo root) and `scripts/{run-training,setup}.sh` cd'd to theirs
+(now `..`). A wrong anchor there builds a corpus in the wrong place rather than
+raising.
 
 Corpora are siblings under `my_custom_model/<wake_word>/{oww,mww}/`, so neither
 trainer reaches into the other's. That nesting also fixed a bug: `setup_training_dirs`
-rmtree'd `my_custom_model/<wake_word>/`, which is where `run-training.sh` archives the
+rmtree'd `my_custom_model/<wake_word>/`, which is where `scripts/run-training.sh` archives the
 commit-tagged models - every run deleted the archive of every previous run.
 `patches/configurable-corpus-dir.py` makes openWakeWord read the corpus location from
 its config, since upstream derives it from the same value that names the model.
 
-`1_datagen/`, `2_train/`, `3_eval/` still exist and are still empty - three
-directories claiming a structure nothing uses.
+The empty `1_datagen/`, `2_train/`, `3_eval/` directories this file used to complain
+about are gone.
 
 **Do not refactor `train.py` before phase 2.** Its behaviour is the baseline that
 sixteen runs of `tuning.md` are calibrated against; a refactor that quietly changes

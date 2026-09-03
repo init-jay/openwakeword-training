@@ -8,7 +8,7 @@ description: Evaluate a newly trained wake-word model from this repo — openWak
 Four rules, each learned by getting it wrong. They are in `tuning.md` in full; the
 short version is here because ignoring any one produces a confident wrong answer.
 
-**1. Score on recordings made AFTER the model trained.** `train.py` trains on
+**1. Score on recordings made AFTER the model trained.** `train/oww/train.py` trains on
 everything under `my_real_samples/`, so pointing an evaluation there reports training
 accuracy. It overstated detection by ~10 points and hid a much larger gap on run-on
 speech. Held-out sets live in `my_real_samples_holdout/`.
@@ -17,7 +17,7 @@ speech. Held-out sets live in `my_real_samples_holdout/`.
 configuration measured 77% and 67% on held-out run-on speech at threshold 0.5, and
 both reached 95% at 8/32 false accepts. What varies between runs is largely where the
 score distribution sits, not how well the model separates classes. Always compare at
-matched false-accept rates — that is what `compare_models.py` does. **This matters even
+matched false-accept rates — that is what `eval/compare_models.py` does. **This matters even
 more across the two trainers, which share no threshold scale at all.**
 
 **3. Score every speaker separately, and never pool them.** Added after a run found
@@ -38,7 +38,7 @@ and CUDA TensorFlow, and both are linux/amd64 server images.
 
 ```bash
 docker compose build eval        # once; ~1 min, no TensorFlow, no emulation
-docker compose run --rm eval python compare_models.py ...
+docker compose run --rm eval python -m eval.compare_models ...
 ```
 
 `eval/backends.py` picks the backend by inspecting the model and **runs the inference
@@ -64,16 +64,16 @@ docker compose run --rm eval python -m eval.backends --model <model>
 
 # 1. The main comparison: new model against the previous best, matched precision.
 #    Run it ONCE PER SPEAKER — see rule 3.
-docker compose run --rm eval python compare_models.py \
+docker compose run --rm eval python -m eval.compare_models \
     --models <new> <prev> \
     --positives my_real_samples_holdout/jay --runon my_real_samples_holdout/jay_runon
 
 # 2. Per-category detail for one model: which negatives fire, latency, misses, gates
-docker compose run --rm eval python eval_model.py --model <model> \
+docker compose run --rm eval python -m eval.eval_model --model <model> \
     --positives my_real_samples_holdout/jay --threshold <operating point>
 
 # 3. Choosing a deployment threshold
-docker compose run --rm eval python compare_models.py --models <model> --sweep
+docker compose run --rm eval python -m eval.compare_models --models <model> --sweep
 
 # 4. openWakeWord .onnx only: where in the window the model expects the phrase.
 #    Compare against TRAINED-set clips, not held-out, so it is comparable across runs.
@@ -118,7 +118,7 @@ sliding-window average — so there is no alignment measurement for those yet.
 **Its usable range is 0.25 upwards, not 0.01 upwards.** The first model's resting
 score is 0.245, so at 0.15 — openWakeWord's shipping threshold — *every* negative in
 the corpus fires, 32/32 adversarial and 68/68 ordinary. Carrying an openWakeWord
-threshold habit across produces a detector that never stops firing. `compare_models.py`
+threshold habit across produces a detector that never stops firing. `eval/compare_models.py`
 sweeps up to 0.95 for this reason.
 
 **"Threshold" is two parameters**: `probability_cutoff` and `sliding_window_size`. Fix
@@ -155,8 +155,8 @@ loads cleanly and detects nothing:
 
 ```bash
 docker compose run --rm --no-deps trainer \
-    python onnx2tflite.py <model>.onnx -o <model>.tflite
-docker compose run --rm eval python compare_models.py --models <model>.onnx <model>.tflite
+    python -m train.oww.onnx2tflite <model>.onnx -o <model>.tflite
+docker compose run --rm eval python -m eval.compare_models --models <model>.onnx <model>.tflite
 ```
 
 The `.tflite` also moves it onto the deployment runtime — `pyopen-wakeword` is
@@ -168,14 +168,14 @@ default:
 ```bash
 # --max-faph 0.0 (the default) will REFUSE: no measured cutoff reaches zero false
 # accepts per hour while still detecting anything. Pick a real budget.
-docker compose run --rm eval python -m mww.manifest --wake-word "hey seeree" \
+docker compose run --rm eval python -m train.mww.manifest --wake-word "hey seeree" \
     --models-dir my_custom_model --run mww --max-faph <budget>
 
-docker compose run --rm eval python eval_model.py --model <run>/<wake_word>.json \
+docker compose run --rm eval python -m eval.eval_model --model <run>/<wake_word>.json \
     --threshold <the cutoff it chose>
 ```
 
-`mww/manifest.py` reads `tflite_streaming_roc.txt`, which is scored on ambient audio
+`train/mww/manifest.py` reads `tflite_streaming_roc.txt`, which is scored on ambient audio
 and contains none of this repo's adversarial negatives — so it cannot see the `extend`
-problem. **Always confirm the chosen cutoff against the holdout with `eval_model.py`
+problem. **Always confirm the chosen cutoff against the holdout with `eval/eval_model.py`
 before deploying it.**

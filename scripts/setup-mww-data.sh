@@ -5,7 +5,7 @@
 # THIS DELIBERATELY DOWNLOADS NOTHING ELSE. mWW's augmentation wants impulse
 # responses and background audio, and those are the SAME three corpora setup-data.sh
 # already fetched for openWakeWord - MIT RIRs, AudioSet and FMA, from the same URLs.
-# mww/config.py points `impulse_paths` and `background_paths` at them in place.
+# train/mww/config.py points `impulse_paths` and `background_paths` at them in place.
 # Re-fetching would cost another ~10 GB for identical bytes.
 #
 # What is genuinely new is the ambient negative sets. They are pre-computed

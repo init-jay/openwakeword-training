@@ -8,6 +8,13 @@ reasoning is worth more than the conclusions when picking the next lever.
 
 Seventeen runs against "hey seeree", every number measured rather than estimated.
 
+**Paths in the run sections below are pre-reorg and are left that way on purpose.** The
+tree was reorganised to follow `architecture.md` on 2026-09-03: `train.py` is now
+`train/oww/train.py`, `compare_models.py` and `eval_model.py` are under `eval/`, and
+everything runs as a module from the repo root (`python -m eval.compare_models`). The
+commands recorded in past entries were true when those runs happened, and a notebook
+that gets edited to match today stops being evidence of what was actually done.
+
 ## Current settings and results
 
     --training-steps 50000        50k beat 100k on run-on, replicated
