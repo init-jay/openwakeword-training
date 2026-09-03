@@ -3,8 +3,7 @@
     "allow": [
       "Bash(docker compose *)",
       "Bash(grep -viE \"warn|INFO|^ *$|migration|litert|See the|for details|Container\")",
-      "Bash(echo \"exit=$?\")",
-      "Edit(/.claude/skills/evaluate-run/**)"
+      "Bash(echo \"exit=$?\")"
     ]
   }
 }
