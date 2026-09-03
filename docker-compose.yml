@@ -155,6 +155,33 @@ services:
     command: ["--uri", "tcp://0.0.0.0:10200", "--data-dir", "/data",
               "--download-dir", "/data", "--voice", "en_US-lessac-medium"]
 
+  # Evaluation harness (plan.md phase 3). CPU only, no GPU reservation, and the one
+  # service here meant to run ON THE MAC rather than on the training server - it
+  # builds native for linux/arm64. It carries both inference stacks and neither
+  # trainer, because scoring a model and training one have incompatible pins.
+  #
+  #   docker compose build eval
+  #   docker compose run --rm eval python -m eval.backends --model M
+  #   docker compose run --rm eval python compare_models.py --models A B --sweep
+  #
+  # Read-only mounts on everything but nothing: evaluation writes no files, and the
+  # corpora it reads are the ones a stray write would be most expensive to corrupt.
+  eval:
+    build:
+      context: .
+      dockerfile: Dockerfile.eval
+    volumes:
+      - ./eval:/app/eval:ro
+      - ./eval_model.py:/app/eval_model.py:ro
+      - ./compare_models.py:/app/compare_models.py:ro
+      - ./check_model_alignment.py:/app/check_model_alignment.py:ro
+      - ./my_custom_model:/app/my_custom_model:ro
+      - ./my_real_samples_holdout:/app/my_real_samples_holdout:ro
+      # Training positives, for the rare deliberate check against them. Scoring here
+      # reports TRAINING accuracy - see rule 1 in tuning.md.
+      - ./my_real_samples:/app/my_real_samples:ro
+      - ./negatives_tts:/app/negatives_tts:ro
+
   # microWakeWord trainer, for the ESP32 target (plan.md phase 2). A SEPARATE image
   # from `trainer` because mWW requires numpy>=2 and this repo pins numpy<2 for
   # openWakeWord and torch - they cannot share an environment. See Dockerfile.mww.

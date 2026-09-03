@@ -29,13 +29,27 @@ generate_negatives.py is adversarial by construction - a fifth of it is
 phrase-extending - so a pooled false-accept rate means nothing. Category comes from
 the filename prefix (`extend_000_af_bella.wav` -> `extend`).
 
+BOTH TRAINERS ARE SCORED THROUGH THE SAME CODE. `eval/backends.py` picks an
+openWakeWord or a microWakeWord backend by inspecting the model, so everything below
+is arithmetic over scores. Two consequences worth stating rather than discovering:
+
+* The gates were calibrated on openWakeWord and are reported for either, but a
+  microWakeWord score is a sliding-window average with different threshold
+  semantics - `--sliding-window-size` is printed with every result for that reason.
+  Keep mWW numbers in tuning_mww.md.
+* Latency is measured the same way for both and is the one number that transfers
+  directly: it is the deployed quantity either way.
+
 Usage:
     python eval_model.py --model my_custom_model/hey_seeree/hey_seeree.onnx
     python eval_model.py --model M --positives my_real_samples/jay
     python eval_model.py --model M --threshold 0.7 --verbose
 
-Needs onnxruntime and an importable openwakeword, so run it in the trainer container
-or with PYTHONPATH pointing at an openWakeWord checkout.
+Needs onnxruntime and an importable openwakeword for .onnx models, plus a TFLite
+runtime and pymicro-features for microWakeWord ones. The `eval` compose service has
+all of it and runs on the Mac:
+
+    docker compose run --rm eval python eval_model.py --model M
 """
 
 import argparse
@@ -48,8 +62,11 @@ from pathlib import Path
 import numpy as np
 import scipy.io.wavfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from eval import backends  # noqa: E402
+
 SR = 16000
-FRAME = 1280                # predict_clip's step: 80 ms
 NOISE_FLOOR = 30.0          # std dev in 16-bit counts; stands in for room tone
 PAD_S = 1.0                 # noise before and after each clip
 SPEECH_END_FRAC = 0.02      # "end of speech" = last sample above 2% of peak
@@ -108,14 +125,14 @@ def with_noise_floor(data, rng, pad_s=PAD_S):
     return np.concatenate([lead, data, tail]), pad
 
 
-def stream(model, name, audio):
-    """Per-frame scores for one clip, plus the audio offset each frame reflects."""
-    model.reset()
-    frames = model.predict_clip(audio, padding=0)
-    scores = np.array([f[name] for f in frames])
-    # Frame k is produced after the model has consumed (k+1)*FRAME samples.
-    offsets = (np.arange(len(scores)) + 1) * FRAME
-    return scores, offsets
+def stream(backend, audio):
+    """Per-frame scores for one clip, plus the audio offset each frame reflects.
+
+    The step differs by backend - 80 ms for openWakeWord, 30 ms for microWakeWord -
+    which is why the offsets come back from the model rather than from a constant
+    here. Everything downstream reads them and stays backend-agnostic.
+    """
+    return backend.score(audio)
 
 
 def first_crossing(scores, offsets, threshold):
@@ -135,12 +152,12 @@ def load_dir(directory, recursive=True):
     return out, skipped
 
 
-def evaluate_positives(model, name, clips, threshold, rng, verbose):
+def evaluate_positives(backend, clips, threshold, rng, verbose):
     """Per-clip (name, detected, latency_ms or None, peak score)."""
     rows = []
     for clip_name, data in clips:
         audio, pad = with_noise_floor(data, clip_rng(clip_name))
-        scores, offsets = stream(model, name, audio)
+        scores, offsets = stream(backend, audio)
         crossing = first_crossing(scores, offsets, threshold)
         latency = None
         if crossing is not None:
@@ -160,7 +177,7 @@ def group_key(clip_name):
     return "_".join(parts[:2]) if len(parts) >= 3 else "(ungrouped)"
 
 
-def evaluate_with_command(model, name, clips, commands, threshold, rng, gap_ms, verbose):
+def evaluate_with_command(backend, clips, commands, threshold, rng, gap_ms, verbose):
     """Detection when a command follows the phrase, with an optional pause between.
 
     The gap is the discriminating variable: tuning.md measured 20/30 with the command
@@ -173,7 +190,7 @@ def evaluate_with_command(model, name, clips, commands, threshold, rng, gap_ms, 
         gap = np.zeros(int(SR * gap_ms / 1000), dtype=np.int16) if gap_ms else None
         parts = [data] + ([gap] if gap is not None else []) + [command]
         audio, _ = with_noise_floor(np.concatenate(parts), clip_rng(clip_name))
-        scores, _ = stream(model, name, audio)
+        scores, _ = stream(backend, audio)
         if scores.max() >= threshold:
             detected += 1
         else:
@@ -184,12 +201,12 @@ def evaluate_with_command(model, name, clips, commands, threshold, rng, gap_ms, 
     return detected, misses
 
 
-def evaluate_negatives(model, name, clips, threshold, rng):
+def evaluate_negatives(backend, clips, threshold, rng):
     """Max score per clip, grouped by the category in the filename prefix."""
     by_category = defaultdict(list)
     for clip_name, data in clips:
         audio, _ = with_noise_floor(data, clip_rng(clip_name))
-        scores, _ = stream(model, name, audio)
+        scores, _ = stream(backend, audio)
         match = CATEGORY_RE.match(clip_name)
         category = match.group(1) if match else "(uncategorised)"
         by_category[category].append((clip_name, float(scores.max())))
@@ -218,16 +235,17 @@ def main():
                              "filename (speed_0.55_af_bella -> speed_0.55), as "
                              "generate_positives.py names them")
     parser.add_argument("--verbose", action="store_true", help="Print a row per positive")
+    parser.add_argument("--sliding-window-size", type=int, default=None,
+                        help="microWakeWord only: probabilities averaged before "
+                             "thresholding, as the runtime does. A cutoff is only "
+                             "meaningful alongside this. Default: whatever the "
+                             "manifest says, so the manifest is under test too")
     args = parser.parse_args()
 
-    # Imported here so --help works without openwakeword installed.
-    from openwakeword.model import Model
-
-    # openWakeWord defaults to tflite; pick from the extension so the gates can be
-    # scored on the artifact that actually ships, not only on the ONNX it came from.
-    framework = "tflite" if Path(args.model).suffix == ".tflite" else "onnx"
-    name = Path(args.model).stem
-    model = Model(wakeword_models=[args.model], inference_framework=framework)
+    # The backend picks itself by inspecting the model, so the gates can be scored on
+    # the artifact that actually ships rather than on the ONNX it came from - and on
+    # a microWakeWord streaming tflite, which openwakeword.model.Model cannot load.
+    backend = backends.load(args.model, sliding_window_size=args.sliding_window_size)
     rng = np.random.default_rng(0)
 
     positives, skipped_p = load_dir(args.positives)
@@ -243,12 +261,13 @@ def main():
 
     print("=" * 70)
     print(f"{Path(args.model).name}   threshold {args.threshold}")
+    print(backend.describe())
     print(f"{len(positives)} positives from {args.positives}, "
           f"{len(negatives)} negatives from {args.negatives}")
     print("=" * 70)
 
     # --- negatives, per category -------------------------------------------------
-    by_category = evaluate_negatives(model, name, negatives, args.threshold, rng)
+    by_category = evaluate_negatives(backend, negatives, args.threshold, rng)
     print("\nFALSE ACCEPTS BY CATEGORY (never read these pooled)")
     print(f"  {'category':<12}{'n':>4}{'fired':>7}{'rate':>8}{'median':>9}{'worst':>8}")
     adversarial_n = adversarial_fired = 0
@@ -272,7 +291,7 @@ def main():
 
     # --- positives ---------------------------------------------------------------
     print("\nPOSITIVES")
-    rows = evaluate_positives(model, name, positives, args.threshold, rng, args.verbose)
+    rows = evaluate_positives(backend, positives, args.threshold, rng, args.verbose)
     detected = sum(1 for r in rows if r[1])
     latencies = [r[2] for r in rows if r[2] is not None]
     misses = [(r[0], r[3]) for r in rows if not r[1]]
@@ -318,9 +337,9 @@ def main():
     if commands:
         print(f"\nPOSITIVES WITH A COMMAND FOLLOWING ({len(commands)} commands, cycled)")
         detected_cmd, _ = evaluate_with_command(
-            model, name, positives, commands, args.threshold, rng, 0, args.verbose)
+            backend, positives, commands, args.threshold, rng, 0, args.verbose)
         detected_gap, _ = evaluate_with_command(
-            model, name, positives, commands, args.threshold, rng,
+            backend, positives, commands, args.threshold, rng,
             args.command_gap_ms, False)
         n = len(positives)
         print(f"  command immediately after {detected_cmd}/{n} ({detected_cmd / n:.0%})")

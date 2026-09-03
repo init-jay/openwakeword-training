@@ -75,8 +75,9 @@ One repo, two trainers behind a shared corpus layer. As built:
       features.py            -> .../mww/features/<set>/<split>/*_mmap
       config.py              -> the training YAML
       train.py               -> quantized streaming tflite
-      manifest.py            NOT WRITTEN - the ESPHome JSON
-    eval/                    NOT WRITTEN - phase 3
+      manifest.py            -> the ESPHome/LVA JSON
+    eval/
+      backends.py            one streaming contract over the DEPLOYMENT runtime
 
 Corpora are siblings under `my_custom_model/<wake_word>/{oww,mww}/`, so neither
 trainer reaches into the other's. That nesting also fixed a bug: `setup_training_dirs`
@@ -316,52 +317,74 @@ negatives are ~1100 clips - a rounding error beside them unless weighted, and
 run 6). `sampling_weight` and `penalty_weight` are per feature set, which is a better
 instrument than openWakeWord's single `max_negative_weight`. Untuned so far.
 
-## Phase 3 - evaluation (the expensive part, 1-2 weeks)
+## Phase 3 - evaluation
 
-All three eval tools instantiate `openwakeword.model.Model(wakeword_models=[path],
-inference_framework=...)` - `compare_models.py:66`, `eval_model.py:228`,
-`check_model_alignment.py:145` (verified). A mWW streaming tflite will not load there.
+**Status: BUILT.** `eval/backends.py`, `Dockerfile.eval`, the `eval` compose service.
+`eval_model.py` and `compare_models.py` score both trainers' models through it; the
+first mWW model is measured in `tuning_mww.md`.
 
-The good news: `check_model_alignment.py:134` already defines a `WakeWordModel` class
-that wraps "onnx or tflite" behind one interface. **Generalise that into
-`eval/backends.py` and point all three tools at it.** The contract both backends can
-honour is the one `eval_model.py:111` `stream()` already assumes: feed 16 kHz PCM in
-fixed chunks, get one score per chunk, reset between clips.
+### The design changed in one important way: don't reimplement inference
 
-Everything downstream of that contract - per-category false accepts, per-speaker
-scoring, matched-FA comparison, the latency measurement - is arithmetic over scores and
-carries over unchanged. That is the payoff for doing it as an interface rather than a
-fork.
+The plan above said to generalise `check_model_alignment.py`'s `WakeWordModel` into a
+two-backend interface. That was followed, and the first version of `backends.py` also
+**reimplemented microWakeWord's inference** - frontend loop, int8 quantization, slice
+striding, sliding-window average - from the training repo's source. That was wrong
+twice over: it measured a pipeline nothing ships, and every detail it got right had to
+be rediscovered by experiment.
 
-Four traps, in the order they will bite:
+**The deployment target is Linux Voice Assistant** (OHF-Voice/linux-voice-assistant),
+which implements no inference of its own. It depends on two libraries:
 
-1. **State leaks between clips.** The mWW model is `stream_state_internal` - it carries
-   internal state across invocations. Without an explicit reset, clip N's score depends
-   on clip N-1, and the corpus order silently becomes a variable. `clip_rng`
-   (`eval_model.py:92`) exists because of an almost identical bug, where shared padding
-   noise made a clip's result depend on how many clips preceded it. Verify the reset
-   works by scoring one corpus in two different orders and requiring identical output.
+    pymicro-wakeword   MicroWakeWordFeatures + MicroWakeWord
+    pyopen-wakeword    OpenWakeWordFeatures  + OpenWakeWord
 
-2. **"Threshold" becomes two parameters.** ESPHome exposes `probability_cutoff` *and*
-   `sliding_window_size` (verified). The single-threshold sweep in `compare_models.py`
-   becomes a 2D surface, and rule 2 of `tuning.md` - never compare at a fixed threshold,
-   always at matched false accepts - needs restating for two knobs. Simplest honest
-   version: fix `sliding_window_size` per comparison, sweep the cutoff, and report the
-   window size alongside every number.
+`backends.py` now drives both exactly as LVA's `__main__.py` does, down to the chunk
+size, and computes no features and quantizes no tensors of its own. What is left is
+clip handling and the arithmetic that turns probabilities into audio offsets.
 
-3. **int8 quantisation coarsens the scores.** The current sweep goes down to 0.01 and
-   the gap between 0.02 and 0.05 has been meaningful (run 16: jay run-on 95% vs 86%).
-   A quantised model may not have that resolution. Check the actual distinct score
-   values before designing the sweep around fine thresholds.
+Consequences worth stating:
 
-4. **Alignment means something different.** `check_model_alignment.py` sweeps where the
-   phrase sits in a 2000 ms window; mWW's clip duration is 1500 ms and it is a streaming
-   detector with a sliding window average. The latency floor is still measurable and
-   still matters - it is the deployed number - but the current tool's framing does not
-   transfer directly. Redesign rather than port.
+* **The manifest is part of the model.** `MicroWakeWord.from_config()` takes the JSON,
+  so scoring the `.json` puts `sliding_window_size` and `probability_cutoff` under test
+  with the weights. This is how the dead `probability_cutoff: 1.0` manifest was caught.
+* **Both wheels ship `manylinux_2_35_aarch64`**, so the image builds native on Apple
+  Silicon and needs no TensorFlow, no ai-edge-litert and no emulation. The base must be
+  bookworm or newer: bullseye's glibc 2.31 is below 2.35 and would fall back to an sdist.
+* **The openWakeWord side is not on the deployment runtime yet.** `pyopen-wakeword` is
+  TFLite-only and the ship candidates are `.onnx`, so `OpenWakeWordOnnxBackend` scores
+  them through `openwakeword.model.Model` - comparable with `tuning.md`, not with a
+  device. Converting `d1bb9f4` with `onnx2tflite.py` closes this.
 
-The eval corpora themselves - `my_real_samples_holdout/`, `negatives_tts/` - are WAVs
-and carry over untouched.
+### The four traps, as they actually bit
+
+1. **State leaks between clips - CONFIRMED, and worse than expected.** The obvious fix
+   does not work: an interpreter with `reset_all_variables()` called and its inputs
+   re-zeroed still scores one clip 1.00000 the first time and 0.99608 every time after,
+   with or without XNNPACK. Rebuilding the interpreter per clip is the only version
+   measured to be reproducible - which is exactly what `MicroWakeWord.reset()` does,
+   with the comment "Need to reload model to reset intermediary results". Using the
+   deployment runtime made the problem disappear rather than needing solving.
+
+   The self-check (`python -m eval.backends --model M`) compares **full score traces**
+   in two corpus orders, not peaks. The leak moved fine scores by 1/255 and left most
+   peaks at exactly 1.0, so a peak comparison passed the broken version.
+
+2. **"Threshold" is two parameters - CONFIRMED.** `sliding_window_size` defaults to the
+   manifest's value, is overridable, and is printed with every result.
+
+3. **int8 coarsens the scores - CONFIRMED, but the real problem was the FLOOR, not the
+   resolution.** Resolution is 0.00078, fine enough. What matters is that the model's
+   resting score is 0.245, so **every negative in the corpus fires at 0.15 and below** -
+   the threshold openWakeWord ships at. The sweep was extended upwards to 0.95;
+   microWakeWord's usable range is 0.25 up, not 0.01 up. See `tuning_mww.md`.
+
+4. **Alignment means something different - NOT ADDRESSED.** `check_model_alignment.py`
+   remains openWakeWord-only. Latency from end of speech is measured for both by
+   `eval_model.py` and is the deployed quantity; where in its window a streaming model
+   wants the phrase still has no tool.
+
+The eval corpora themselves - `my_real_samples_holdout/`, `negatives_tts/` - carried
+over untouched, as predicted.
 
 ## What this plan does not do
 
@@ -392,7 +415,7 @@ and carry over untouched.
 
 **Planned:** phase 0 → phase 3's `backends.py` interface → phase 1 → phase 2.
 
-**Actual:** phase 1 → phase 2, with phase 0 skipped and phase 3 not started.
+**Actual:** phase 1 → phase 2 → phase 3, with phase 0 skipped.
 
 The argument for the planned order was: **define the eval interface before building
 the trainer**, because models are cheap and trustworthy measurement is not, and eight
@@ -401,13 +424,19 @@ trainer first means the first mWW model arrives with no way to tell whether it i
 good - and the temptation is to judge it at a fixed threshold, which is the mistake
 `tuning.md` opens by warning about.
 
-That is now the situation. A mWW model trains, and nothing can score it:
-`compare_models.py`, `eval_model.py` and `check_model_alignment.py` all load through
-`openwakeword.model.Model`, which cannot read a streaming tflite with internal state.
-The first model came out with `average_viable_recall = 0.000` at every step and
-looked excellent by accuracy, recall, precision and AUC - which is exactly the failure
-the ordering was meant to prevent.
+That is exactly what happened. The first mWW model came out with
+`average_viable_recall = 0.000` at every step and looked excellent by accuracy,
+recall, precision and AUC. Then it was trained a second time, correctly, and arrived
+with nothing able to score it - `compare_models.py`, `eval_model.py` and
+`check_model_alignment.py` all loaded through `openwakeword.model.Model`, which cannot
+read a streaming tflite with internal state.
 
-Skipping phase 0 cost six avoidable failures (phase 2). Skipping phase 3's interface
-has cost nothing yet only because no mWW model has needed judging. **Phase 3 is the
-next thing, before any mWW tuning run.**
+**What the inverted order actually cost, now that phase 3 is built:** a manifest that
+shipped `probability_cutoff: 1.0`, at which the model detects nothing. It was written
+by `mww/manifest.py` from a synthetic row in the ROC table, it is a legal value the
+runtime loads without complaint, and it survived because there was no way to score the
+model it described. That is the same class of failure as `average_viable_recall =
+0.000`, from the same cause, one phase later.
+
+Skipping phase 0 cost six avoidable failures (phase 2). Inverting phase 3 cost this
+one. **Do not train another mWW configuration without scoring the previous one.**

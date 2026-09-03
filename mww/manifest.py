@@ -18,8 +18,20 @@ runs of one configuration read 77% and 67% there.
     Cutoff 0.60: frr=0.0116; faph=0.281
 
 `--max-faph` picks the lowest cutoff meeting a false-accepts-per-hour budget, which
-maximises recall subject to that budget. Default 0.0: the most conservative choice
-the measurement supports.
+maximises recall subject to that budget. Default 0.0, the most conservative choice
+the measurement supports - but see `choose_cutoff` for why that default nearly always
+lands on a synthetic row, and shipped one manifest that could not fire.
+
+AND THE ROC IS A GUIDE, NOT THE MEASUREMENT. Two reasons to confirm the cutoff with
+`eval/backends.py` against held-out recordings before deploying it:
+
+  * The ROC is scored on the ambient evaluation sets, not on this repo's adversarial
+    negatives. `extend` false accepts - the failure mode unsolved since run 6 - are
+    not in it at all.
+  * The training repo dequantizes probabilities with a hardcoded 1/255
+    (microwakeword/inference.py); the deployment runtime uses the output tensor's
+    own scale, 1/256 here. A cutoff read off this table is ~0.4% away from the number
+    the device compares against.
 
 SLIDING_WINDOW_SIZE AND THE CUTOFF ARE A PAIR. The ROC is computed with a sliding
 window average of 5 (microwakeword/test.py:301), so a cutoff read off that table is
@@ -87,14 +99,31 @@ def choose_cutoff(rows, max_faph):
     Lower cutoff means more detections, so more false accepts AND fewer false
     rejects. Walking up from the lowest cutoff and taking the first that fits the
     budget gives the most sensitive operating point that still meets it.
+
+    ROWS WITH frr == 1.0 ARE NOT OPERATING POINTS AND ARE DISCARDED FIRST. When no
+    measured cutoff reaches the faph floor, microwakeword's generate_roc_curve
+    (test.py:192-196) APPENDS A SYNTHETIC POINT at (faph 0, frr 1) to close the
+    curve. It is a plotting terminator - a model that rejects everything - and it is
+    the only row that satisfies the default --max-faph 0.0, so it won every time.
+    That is how `hey_seeree.json` shipped with probability_cutoff 1.0, a manifest
+    whose model cannot fire; measured on held-out recordings, the same model detects
+    97% of jay's clips at 0.5. Nothing downstream could have caught it: a cutoff of
+    1.0 is a legal value and ESPHome loads it without complaint.
     """
-    eligible = [r for r in rows if r[2] <= max_faph]
-    if not eligible:
-        best = min(rows, key=lambda r: r[2])
+    real = [r for r in rows if r[1] < 1.0]
+    if not real:
         raise SystemExit(
-            f"no cutoff achieves faph <= {max_faph}. The lowest measured is "
-            f"{best[2]} at cutoff {best[0]} (frr {best[1]}). Raise --max-faph, or "
-            f"treat this as the model not being good enough to deploy.")
+            f"{len(rows)} cutoffs in the ROC and every one has frr 1.0 - the model "
+            f"detects nothing at any threshold. Do not ship this.")
+
+    eligible = [r for r in real if r[2] <= max_faph]
+    if not eligible:
+        best = min(real, key=lambda r: r[2])
+        raise SystemExit(
+            f"no cutoff achieves faph <= {max_faph} while detecting anything. The "
+            f"lowest measured is {best[2]} at cutoff {best[0]} (frr {best[1]}). "
+            f"Raise --max-faph, or treat this as the model not being good enough "
+            f"to deploy.")
     return min(eligible, key=lambda r: r[0])
 
 
